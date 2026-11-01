@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { buildPlotFrames, calibColor, calibLabel, frameAtTime, loadFromFileList } from './parseFiles';
+import { buildPlotFrames, calibColor, calibLabel, frameAtTime, frameTime, loadFromFileList } from './parseFiles';
 import {
   drawDistancePlot,
   drawYawPitchPlot,
@@ -10,10 +10,46 @@ import {
   type LineDrawOptions,
   type ScatterDrawOptions,
 } from './plotCanvas';
-import type { LoadedSession } from './types';
+import type { GazeFrame, LoadedSession } from './types';
 import './styles.css';
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3];
+
+function FrameStats({ frame }: { frame: GazeFrame | null }) {
+  if (!frame) {
+    return (
+      <div className="frame-stats">
+        <span className="muted">No gaze record within 1.0s of this timestamp</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="frame-stats">
+      <span>
+        <b>t</b> {formatTime(frameTime(frame))} ({frameTime(frame).toFixed(2)}s)
+      </span>
+      {frame.frame_name && <span><b>frame</b> {frame.frame_name}</span>}
+      <span>
+        <b>gaze</b> y={fmt(frame.gaze_yaw)} p={fmt(frame.gaze_pitch)}
+      </span>
+      <span>
+        <b>head</b> y={fmt(frame.head_yaw)} p={fmt(frame.head_pitch)} r={fmt(frame.head_roll)}
+      </span>
+      <span>
+        <b>status</b> {frame.status ?? '—'}
+      </span>
+      {frame.pred != null && <span><b>pred</b> {frame.pred}</span>}
+      {frame.reason != null && <span><b>reason</b> {frame.reason}</span>}
+      {(frame.dyaw != null || frame.dpitch != null) && (
+        <span><b>delta</b> y={fmt(frame.dyaw)} p={fmt(frame.dpitch)}</span>
+      )}
+      {frame.gaze_yaw == null && frame.gaze_pitch == null && (
+        <span className="muted">Gaze yaw/pitch unavailable</span>
+      )}
+    </div>
+  );
+}
 
 interface CalibPreview {
   name: string;
@@ -55,19 +91,6 @@ export default function App() {
     () => frameAtTime(session?.gaze ?? null, currentTime),
     [session?.gaze, currentTime]
   );
-
-  const displayFrame =
-    liveFrame && liveFrame.gaze_yaw != null && liveFrame.gaze_pitch != null
-      ? {
-          t: liveFrame.time_seconds ?? (liveFrame.time_ms ?? 0) / 1000,
-          gaze_yaw: liveFrame.gaze_yaw,
-          gaze_pitch: liveFrame.gaze_pitch,
-          head_yaw: liveFrame.head_yaw,
-          head_pitch: liveFrame.head_pitch,
-          head_roll: liveFrame.head_roll,
-          status: liveFrame.status ?? undefined,
-        }
-      : null;
 
   const scatterOpts = useCallback((): ScatterDrawOptions | null => {
     const wrap = scatterWrapRef.current;
@@ -384,32 +407,7 @@ export default function App() {
                         {formatTime(currentTime)} / {formatTime(timelineDuration)}
                       </span>
                     </div>
-                    <div className="frame-stats">
-                      {displayFrame ? (
-                        <>
-                          <span>
-                            <b>t</b> {formatTime(displayFrame.t)} ({displayFrame.t.toFixed(2)}s)
-                          </span>
-                          <span>
-                            <b>gaze</b> y={fmt(displayFrame.gaze_yaw)} p={fmt(displayFrame.gaze_pitch)}
-                          </span>
-                          <span>
-                            <b>head</b> y={fmt(displayFrame.head_yaw)} p={fmt(displayFrame.head_pitch)} r=
-                            {fmt(displayFrame.head_roll)}
-                          </span>
-                          <span>
-                            <b>status</b> {displayFrame.status ?? '—'}
-                          </span>
-                          {liveFrame?.pred && (
-                            <span>
-                              <b>pred</b> {liveFrame.pred}
-                            </span>
-                          )}
-                        </>
-                      ) : (
-                        <span className="muted">No gaze data at this time</span>
-                      )}
-                    </div>
+                    <FrameStats frame={liveFrame} />
                   </>
                 ) : (
                   <div className="video-placeholder">
@@ -429,13 +427,7 @@ export default function App() {
                       </label>
                       <span className="time-readout">{formatTime(currentTime)}</span>
                     </div>
-                    <div className="frame-stats">
-                      {displayFrame && (
-                        <span>
-                          {formatTime(displayFrame.t)} · gaze {fmt(displayFrame.gaze_yaw)}/{fmt(displayFrame.gaze_pitch)}
-                        </span>
-                      )}
-                    </div>
+                    <FrameStats frame={liveFrame} />
                   </div>
                 )}
                 <canvas

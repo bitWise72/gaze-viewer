@@ -236,11 +236,21 @@ export function hitTestScatter(
 }
 
 function lineTransform(w: number, h: number, maxT: number, maxD: number) {
-  const plotW = w - pad * 2;
-  const plotH = h - pad * 2 - topExtra;
-  const toX = (t: number) => pad + (t / maxT) * plotW;
-  const toY = (d: number) => pad + topExtra + plotH - (d / maxD) * plotH;
+  const left = pad + 12;
+  const top = pad + topExtra;
+  const bottom = 32;
+  const plotW = w - left - pad;
+  const plotH = h - top - bottom;
+  const toX = (t: number) => left + (t / maxT) * plotW;
+  const toY = (d: number) => h - bottom - (d / maxD) * plotH;
   return { plotW, plotH, toX, toY };
+}
+
+function formatAxisTime(seconds: number, maxTime: number): string {
+  if (maxTime < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.floor(seconds % 60);
+  return `${minutes}:${remainder.toString().padStart(2, '0')}`;
 }
 
 export function drawDistancePlot(canvas: HTMLCanvasElement, opts: LineDrawOptions): void {
@@ -269,19 +279,61 @@ export function drawDistancePlot(canvas: HTMLCanvasElement, opts: LineDrawOption
   const visible = frames.filter((f) => f.t <= opts.currentTime + 0.05);
   const maxD = Math.max(...frames.map((f) => f.distance), 1);
   const { plotH, toX, toY } = lineTransform(w, h, maxT, maxD);
-  const plotW = w - pad * 2;
+  const left = pad + 12;
+  const plotW = w - left - pad;
+  const bottom = h - 32;
 
-  ctx.strokeStyle = '#d0d7e2';
+  ctx.strokeStyle = '#e2e8f0';
   ctx.lineWidth = 1;
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.fillStyle = '#64748b';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const value = (maxD * i) / 4;
+    const y = toY(value);
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(left + plotW, y);
+    ctx.stroke();
+    ctx.fillText(value.toFixed(1), left - 6, y);
+  }
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let i = 0; i <= 4; i++) {
+    const value = (maxT * i) / 4;
+    const x = toX(value);
+    ctx.beginPath();
+    ctx.moveTo(x, pad + topExtra);
+    ctx.lineTo(x, bottom);
+    ctx.stroke();
+    ctx.fillText(formatAxisTime(value, maxT), x, bottom + 4);
+  }
+
+  ctx.strokeStyle = '#cbd5e1';
   ctx.beginPath();
-  ctx.moveTo(pad, pad + topExtra);
-  ctx.lineTo(pad, pad + topExtra + plotH);
-  ctx.lineTo(pad + plotW, pad + topExtra + plotH);
+  ctx.moveTo(left, pad + topExtra);
+  ctx.lineTo(left, bottom);
+  ctx.lineTo(left + plotW, bottom);
   ctx.stroke();
 
   ctx.fillStyle = '#334155';
   ctx.font = '600 11px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
   ctx.fillText(opts.title, pad, 12);
+
+  ctx.fillStyle = '#475569';
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('Time', left + plotW / 2, h - 1);
+  ctx.save();
+  ctx.translate(10, pad + topExtra + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('Distance (°)', 0, 0);
+  ctx.restore();
 
   if (visible.length >= 2) {
     ctx.beginPath();
