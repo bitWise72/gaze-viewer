@@ -10,44 +10,66 @@ import {
   type LineDrawOptions,
   type ScatterDrawOptions,
 } from './plotCanvas';
-import type { GazeFrame, LoadedSession } from './types';
+import type { GazeFrame, GazeLimits, LoadedSession } from './types';
 import './styles.css';
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3];
 
-function FrameStats({ frame }: { frame: GazeFrame | null }) {
-  if (!frame) {
-    return (
-      <div className="frame-stats">
-        <span className="muted">No gaze record within 1.0s of this timestamp</span>
-      </div>
-    );
-  }
-
+function FrameStats({ frame, limits }: { frame: GazeFrame | null; limits: GazeLimits | null }) {
   return (
     <div className="frame-stats">
-      <span>
-        <b>t</b> {formatTime(frameTime(frame))} ({frameTime(frame).toFixed(2)}s)
-      </span>
-      {frame.frame_name && <span><b>frame</b> {frame.frame_name}</span>}
-      <span>
-        <b>gaze</b> y={fmt(frame.gaze_yaw)} p={fmt(frame.gaze_pitch)}
-      </span>
-      <span>
-        <b>head</b> y={fmt(frame.head_yaw)} p={fmt(frame.head_pitch)} r={fmt(frame.head_roll)}
-      </span>
-      <span>
-        <b>status</b> {frame.status ?? '—'}
-      </span>
-      {frame.pred != null && <span><b>pred</b> {frame.pred}</span>}
-      {frame.reason != null && <span><b>reason</b> {frame.reason}</span>}
-      {(frame.dyaw != null || frame.dpitch != null) && (
-        <span><b>delta</b> y={fmt(frame.dyaw)} p={fmt(frame.dpitch)}</span>
+      {frame ? (
+        <>
+          <span>
+            <b>t</b> {formatTime(frameTime(frame))} ({frameTime(frame).toFixed(2)}s)
+          </span>
+          {frame.frame_name && <span><b>frame</b> {frame.frame_name}</span>}
+          <span>
+            <b>gaze</b> y={fmt(frame.gaze_yaw)} p={fmt(frame.gaze_pitch)}
+          </span>
+          <span>
+            <b>head</b> y={fmt(frame.head_yaw)} p={fmt(frame.head_pitch)} r={fmt(frame.head_roll)}
+          </span>
+          <span>
+            <b>status</b> {frame.status ?? '—'}
+          </span>
+          {frame.pred != null && <span><b>pred</b> {frame.pred}</span>}
+          {frame.reason != null && <span><b>reason</b> {frame.reason}</span>}
+          {(frame.dyaw != null || frame.dpitch != null) && (
+            <span><b>delta</b> y={fmt(frame.dyaw)} p={fmt(frame.dpitch)}</span>
+          )}
+          {frame.gaze_yaw == null && frame.gaze_pitch == null && (
+            <span className="muted">Gaze yaw/pitch unavailable</span>
+          )}
+        </>
+      ) : (
+        <span className="muted">No gaze record within 1.0s of this timestamp</span>
       )}
-      {frame.gaze_yaw == null && frame.gaze_pitch == null && (
-        <span className="muted">Gaze yaw/pitch unavailable</span>
+      {limits && (
+        <span><b>limits</b> Δyaw ±{fmt(limits.yaw)}° · Δpitch ±{fmt(limits.pitch)}°</span>
       )}
     </div>
+  );
+}
+
+function TimestampSeek({ duration, onSeek }: { duration: number; onSeek: (time: number) => void }) {
+  const submitTimestamp = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const timestamp = Number(new FormData(form).get('timestamp'));
+    if (!Number.isFinite(timestamp) || timestamp < 0) return;
+    onSeek(Math.min(timestamp, duration));
+    form.reset();
+  };
+
+  return (
+    <form className="timestamp-seek" onSubmit={submitTimestamp}>
+      <label>
+        Time (s)
+        <input name="timestamp" type="number" min="0" step="any" inputMode="decimal" required aria-label="Timestamp in seconds" />
+      </label>
+      <button type="submit" className="btn small secondary">Go</button>
+    </form>
   );
 }
 
@@ -82,6 +104,8 @@ export default function App() {
   const calibPoints = session?.gaze?.calibration?.points ?? [];
   const modeYaw = session?.gaze?.calibration?.mode?.yaw ?? null;
   const modePitch = session?.gaze?.calibration?.mode?.pitch ?? null;
+  const reference = session?.gaze?.calibration?.reference ?? null;
+  const limits = session?.gaze?.calibration?.limits ?? null;
   const timelineDuration = videoDuration || plotFrames.at(-1)?.t || 0;
 
   const hasCalibImages = (session?.calibrationImages.size ?? 0) > 0;
@@ -102,12 +126,14 @@ export default function App() {
       calibPoints,
       modeYaw,
       modePitch,
+      reference,
+      limits,
       currentTime,
       width: w,
       height: h,
       title: 'Yaw / pitch',
     };
-  }, [plotFrames, calibPoints, modeYaw, modePitch, currentTime]);
+  }, [plotFrames, calibPoints, modeYaw, modePitch, reference, limits, currentTime]);
 
   const lineOpts = useCallback((): LineDrawOptions | null => {
     const col = leftColRef.current;
@@ -406,8 +432,9 @@ export default function App() {
                       <span className="time-readout">
                         {formatTime(currentTime)} / {formatTime(timelineDuration)}
                       </span>
+                      <TimestampSeek duration={timelineDuration} onSeek={seekToTime} />
                     </div>
-                    <FrameStats frame={liveFrame} />
+                    <FrameStats frame={liveFrame} limits={limits} />
                   </>
                 ) : (
                   <div className="video-placeholder">
@@ -426,8 +453,9 @@ export default function App() {
                         />
                       </label>
                       <span className="time-readout">{formatTime(currentTime)}</span>
+                      <TimestampSeek duration={timelineDuration} onSeek={seekToTime} />
                     </div>
-                    <FrameStats frame={liveFrame} />
+                    <FrameStats frame={liveFrame} limits={limits} />
                   </div>
                 )}
                 <canvas
@@ -471,6 +499,7 @@ export default function App() {
                     <i className="dash purple" /> mode yaw / pitch
                   </span>
                 )}
+                {limits && <span><i className="limit-box" /> limits</span>}
                 {calibPoints.map((c, i) => (
                   <span key={c.name}>
                     <i className="dot" style={{ background: calibColor(c.name, i) }} /> {calibLabel(c.name)}

@@ -1,4 +1,4 @@
-import type { GazeCalibrationPoint, PlotFrame } from './types';
+import type { GazeCalibrationPoint, GazeLimits, GazeReference, PlotFrame } from './types';
 import { calibColor } from './parseFiles';
 
 export interface ScatterDrawOptions {
@@ -6,6 +6,8 @@ export interface ScatterDrawOptions {
   calibPoints: GazeCalibrationPoint[];
   modeYaw: number | null;
   modePitch: number | null;
+  reference: GazeReference | null;
+  limits: GazeLimits | null;
   currentTime: number;
   width: number;
   height: number;
@@ -56,7 +58,9 @@ export function computeBounds(
   frames: PlotFrame[],
   calib: GazeCalibrationPoint[],
   modeYaw: number | null,
-  modePitch: number | null
+  modePitch: number | null,
+  reference: GazeReference | null = null,
+  limits: GazeLimits | null = null
 ) {
   const xs: number[] = [];
   const ys: number[] = [];
@@ -70,6 +74,10 @@ export function computeBounds(
   }
   if (modeYaw != null) xs.push(modeYaw);
   if (modePitch != null) ys.push(modePitch);
+  if (reference && limits) {
+    xs.push(reference.yaw - limits.yaw, reference.yaw + limits.yaw);
+    ys.push(reference.pitch - limits.pitch, reference.pitch + limits.pitch);
+  }
   if (!xs.length) return { minX: -10, maxX: 10, minY: -10, maxY: 10 };
   const padX = (Math.max(...xs) - Math.min(...xs)) * 0.1 || 5;
   const padY = (Math.max(...ys) - Math.min(...ys)) * 0.1 || 5;
@@ -104,7 +112,7 @@ export function drawYawPitchPlot(canvas: HTMLCanvasElement, opts: ScatterDrawOpt
   ctx.fillStyle = '#fafbfd';
   ctx.fillRect(0, 0, w, h);
 
-  const bounds = computeBounds(opts.frames, opts.calibPoints, opts.modeYaw, opts.modePitch);
+  const bounds = computeBounds(opts.frames, opts.calibPoints, opts.modeYaw, opts.modePitch, opts.reference, opts.limits);
   const { plotW, plotH, toX, toY } = scatterTransform(w, h, bounds);
 
   ctx.strokeStyle = '#d0d7e2';
@@ -114,6 +122,19 @@ export function drawYawPitchPlot(canvas: HTMLCanvasElement, opts: ScatterDrawOpt
   ctx.lineTo(pad, pad + topExtra + plotH);
   ctx.lineTo(pad + plotW, pad + topExtra + plotH);
   ctx.stroke();
+
+  if (opts.reference && opts.limits) {
+    const left = toX(opts.reference.yaw - opts.limits.yaw);
+    const right = toX(opts.reference.yaw + opts.limits.yaw);
+    const top = toY(opts.reference.pitch + opts.limits.pitch);
+    const bottom = toY(opts.reference.pitch - opts.limits.pitch);
+    ctx.save();
+    ctx.strokeStyle = '#91a5bd';
+    ctx.lineWidth = 1.25;
+    ctx.setLineDash([2, 4]);
+    ctx.strokeRect(left, top, right - left, bottom - top);
+    ctx.restore();
+  }
 
   ctx.fillStyle = '#5c6b7a';
   ctx.font = '11px system-ui, sans-serif';
@@ -211,7 +232,7 @@ export function hitTestScatter(
   canvas: HTMLCanvasElement
 ): HoverHit {
   const { x, y } = pointerToPlot(canvas, opts.width, opts.height, clientX, clientY);
-  const bounds = computeBounds(opts.frames, opts.calibPoints, opts.modeYaw, opts.modePitch);
+  const bounds = computeBounds(opts.frames, opts.calibPoints, opts.modeYaw, opts.modePitch, opts.reference, opts.limits);
   const { toX, toY } = scatterTransform(opts.width, opts.height, bounds);
   const visible = opts.frames.filter((f) => f.t <= opts.currentTime + 0.05);
   const r = 11;

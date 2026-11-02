@@ -11,6 +11,11 @@ export interface GazeReference {
   pitch: number;
 }
 
+export interface GazeLimits {
+  yaw: number;
+  pitch: number;
+}
+
 export interface GazeFrame {
   frame_name?: string;
   time_seconds: number;
@@ -33,6 +38,7 @@ export interface GazeResultFile {
   calibration?: {
     reference?: GazeReference | null;
     mode?: GazeReference | null;
+    limits?: GazeLimits | null;
     points?: GazeCalibrationPoint[];
   };
   frames?: GazeFrame[];
