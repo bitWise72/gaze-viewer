@@ -10,6 +10,7 @@ export interface ScatterDrawOptions {
   limits: GazeLimits | null;
   snapshot: boolean;
   selectedFrameIndices?: number[];
+  visibleFrameIndices?: number[];
   currentTime: number;
   width: number;
   height: number;
@@ -31,6 +32,15 @@ export type HoverHit =
 
 const pad = 40;
 const topExtra = 14;
+
+function visibleFrames(opts: ScatterDrawOptions): PlotFrame[] {
+  const inTimeline = opts.snapshot
+    ? opts.frames
+    : opts.frames.filter((frame) => frame.t <= opts.currentTime + 0.05);
+  if (!opts.visibleFrameIndices) return inTimeline;
+  const visibleIndices = new Set(opts.visibleFrameIndices);
+  return inTimeline.filter((frame) => visibleIndices.has(frame.index));
+}
 
 /** Map screen coords to plot logical coords (matches draw buffer when CSS scales the canvas). */
 function pointerToPlot(
@@ -179,9 +189,7 @@ export function drawYawPitchPlot(canvas: HTMLCanvasElement, opts: ScatterDrawOpt
   }
   ctx.setLineDash([]);
 
-  const visible = opts.snapshot
-    ? opts.frames
-    : opts.frames.filter((f) => f.t <= opts.currentTime + 0.05);
+  const visible = visibleFrames(opts);
 
   for (const f of visible) {
     const x = toX(f.yaw);
@@ -246,9 +254,7 @@ export function hitTestScatter(
   const { x, y } = pointerToPlot(canvas, opts.width, opts.height, clientX, clientY);
   const bounds = computeBounds(opts.frames, opts.calibPoints, opts.modeYaw, opts.modePitch, opts.reference, opts.limits);
   const { toX, toY } = scatterTransform(opts.width, opts.height, bounds);
-  const visible = opts.snapshot
-    ? opts.frames
-    : opts.frames.filter((f) => f.t <= opts.currentTime + 0.05);
+  const visible = visibleFrames(opts);
   const r = 11;
 
   for (const c of opts.calibPoints) {
@@ -286,9 +292,7 @@ export function framesInScatterRect(
   const bottom = Math.max(start.y, end.y);
   const bounds = computeBounds(opts.frames, opts.calibPoints, opts.modeYaw, opts.modePitch, opts.reference, opts.limits);
   const { toX, toY } = scatterTransform(opts.width, opts.height, bounds);
-  const visible = opts.snapshot
-    ? opts.frames
-    : opts.frames.filter((frame) => frame.t <= opts.currentTime + 0.05);
+  const visible = visibleFrames(opts);
 
   return visible.filter((frame) => {
     const x = toX(frame.yaw);

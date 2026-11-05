@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  buildAnnotationImportPlan,
+  parseAnnotationCsv,
+} from './annotationImport';
+import {
   buildPlotFrames,
   calibColor,
   calibLabel,
@@ -45,6 +49,11 @@ interface AnnotationPopup {
 interface ReviewAnnotation {
   status: ReviewStatus | null;
   note: string;
+}
+
+interface SavedReviewSet {
+  dots: Record<string, ReviewAnnotation>;
+  instances: Record<string, ReviewAnnotation>;
 }
 
 interface LassoRectangle {
@@ -93,6 +102,67 @@ function reviewProgress(annotations: object, predictions: Record<string, string 
     evaluated: decided.length,
     percentage: decided.length ? Math.round((correct / decided.length) * 100) : null,
   };
+}
+
+function parseReviewAnnotations(value: unknown): Record<string, ReviewAnnotation> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
+  const result: Record<string, ReviewAnnotation> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const annotation = raw as Partial<ReviewAnnotation>;
+    const status = annotation.status;
+    if (status !== null && status !== 'gaze_in' && status !== 'gaze_out' && status !== 'unsure') continue;
+    result[key] = { status, note: typeof annotation.note === 'string' ? annotation.note : '' };
+  }
+  return result;
+}
+
+function reviewStorageKey(clientId: string | undefined, interviewId: string | undefined): string | null {
+  return interviewId ? `gaze-viewer:annotations:${clientId ?? 'no-client'}:${interviewId}` : null;
+}
+
+function loadSavedReviews(clientId: string | undefined, interviewId: string | undefined): SavedReviewSet {
+  const key = reviewStorageKey(clientId, interviewId);
+  if (!key) return { dots: {}, instances: {} };
+  if (!interviewId) return { dots: {}, instances: {} };
+  try {
+    const stored = localStorage.getItem(key);
+    if (!stored) return { dots: {}, instances: {} };
+    const parsed: unknown = JSON.parse(stored);
+    if (typeof parsed !== 'object' || parsed === null) return { dots: {}, instances: {} };
+    const saved = parsed as Partial<SavedReviewSet>;
+    return {
+      dots: parseReviewAnnotations(saved.dots),
+      instances: parseReviewAnnotations(saved.instances),
+    };
+  } catch {
+    return { dots: {}, instances: {} };
+  }
+}
+
+function persistReviewSection(
+  clientId: string | undefined,
+  interviewId: string | undefined,
+  section: keyof SavedReviewSet,
+  annotations: Record<string, ReviewAnnotation>
+): boolean {
+  const saved = loadSavedReviews(clientId, interviewId);
+  return persistReviewSet(clientId, interviewId, { ...saved, [section]: annotations });
+}
+
+function persistReviewSet(
+  clientId: string | undefined,
+  interviewId: string | undefined,
+  reviews: SavedReviewSet
+): boolean {
+  const key = reviewStorageKey(clientId, interviewId);
+  if (!key) return false;
+  try {
+    localStorage.setItem(key, JSON.stringify(reviews));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function FrameStats({ frame, limits }: { frame: GazeFrame | null; limits: GazeLimits | null }) {
@@ -166,13 +236,19 @@ interface CalibPreview {
 export default function App() {
   const [session, setSession] = useState<LoadedSession | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [videoSource, setVideoSource] = useState<'camera' | 'screen'>('camera');
   const [simPlaying, setSimPlaying] = useState(false);
   const [snapshotLocked, setSnapshotLocked] = useState(false);
-  const [dotReviews, setDotReviews] = useState<Record<number, ReviewAnnotation>>({});
+  const [manualAnnotationFilters, setManualAnnotationFilters] = useState<Record<ReviewStatus, boolean>>({
+    gaze_in: true,
+    gaze_out: true,
+    unsure: true,
+  });
+  const [dotReviews, setDotReviews] = useState<Record<string, ReviewAnnotation>>({});
   const [instanceReviews, setInstanceReviews] = useState<Record<string, ReviewAnnotation>>({});
   const [instanceNoteDrafts, setInstanceNoteDrafts] = useState<Record<string, string>>({});
   const [annotationPopup, setAnnotationPopup] = useState<AnnotationPopup | null>(null);
@@ -231,6 +307,15 @@ export default function App() {
     Object.fromEntries(violationInstances.flatMap(({ key }) => instanceReviews[key] ? [[key, instanceReviews[key]]] : [])),
     instancePredictions
   );
+  const visibleDotIndices = useMemo(
+    () => plotFrames
+      .filter((frame) => {
+        const status = dotReviews[String(frame.index)]?.status;
+        return status == null || manualAnnotationFilters[status];
+      })
+      .map((frame) => frame.index),
+    [plotFrames, dotReviews, manualAnnotationFilters]
+  );
 
   const hasCalibImages = (session?.calibrationImages.size ?? 0) > 0;
   const hasCalibMeta = calibPoints.length > 0;
@@ -254,12 +339,13 @@ export default function App() {
       limits,
       snapshot: snapshotLocked,
       selectedFrameIndices: selectedDotIndices,
+      visibleFrameIndices: visibleDotIndices,
       currentTime,
       width: w,
       height: h,
       title: 'Yaw / pitch',
     };
-  }, [plotFrames, calibPoints, modeYaw, modePitch, reference, limits, snapshotLocked, selectedDotIndices, currentTime]);
+  }, [plotFrames, calibPoints, modeYaw, modePitch, reference, limits, snapshotLocked, selectedDotIndices, visibleDotIndices, currentTime]);
 
   const lineOpts = useCallback((): LineDrawOptions | null => {
     const col = leftColRef.current;
@@ -387,22 +473,25 @@ export default function App() {
     if (!files?.length) return;
     setLoadError(null);
     try {
+      const loadedSession = await loadFromFileList(files);
+      const savedReviews = loadSavedReviews(loadedSession.gaze?.client_id, loadedSession.gaze?.interview_id);
       new Set([session?.videoUrl, session?.cameraVideoUrl, session?.screenVideoUrl]
         .filter((url): url is string => Boolean(url)))
         .forEach((url) => URL.revokeObjectURL(url));
       session?.calibrationImages.forEach((u) => URL.revokeObjectURL(u));
-      setSession(await loadFromFileList(files));
+      setSession(loadedSession);
       setCurrentTime(0);
       setVideoDuration(0);
       videoSwitchTimeRef.current = 0;
       setVideoSource('camera');
       setCalibPreview(null);
-      setDotReviews({});
+      setDotReviews(savedReviews.dots);
+      setInstanceReviews(savedReviews.instances);
+      setInstanceNoteDrafts({});
       setSelectedDotIndices([]);
       setAnnotationPopup(null);
       setAnnotationNoteChanged(false);
-      setInstanceReviews({});
-      setInstanceNoteDrafts({});
+      setReviewNotice(null);
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : 'Failed to load');
     }
@@ -414,15 +503,77 @@ export default function App() {
     try {
       const data: unknown = JSON.parse(await file.text());
       const records = parseViolationDump(data);
+      const replacedIds = new Set(records.map((record) => record.id));
+      const nextInstances = Object.fromEntries(
+        Object.entries(instanceReviews).filter(([key]) =>
+          ![...replacedIds].some((id) => key.startsWith(`${id}:`))
+        )
+      );
       setViolationDump({
         fileName: file.name,
         records,
       });
-      setInstanceReviews({});
-      setInstanceNoteDrafts({});
+      setInstanceReviews(nextInstances);
+      setInstanceNoteDrafts((current) => Object.fromEntries(
+        Object.entries(current).filter(([key]) => ![...replacedIds].some((id) => key.startsWith(`${id}:`)))
+      ));
+      if (session?.gaze?.interview_id) {
+        setReviewNotice(
+          persistReviewSection(session.gaze.client_id, session.gaze.interview_id, 'instances', nextInstances)
+            ? null
+            : 'Annotations are active for this tab but could not be saved in browser storage.'
+        );
+      }
     } catch (e) {
-      setViolationDump(null);
-      setLoadError(e instanceof Error ? e.message : 'Failed to load violation dump');
+      setReviewNotice(e instanceof Error ? e.message : 'Failed to load violation dump');
+    }
+  };
+
+  const onAnnotationFiles = async (files: FileList | null) => {
+    if (!files?.length) return;
+    const interviewId = session?.gaze?.interview_id;
+    if (!session || !interviewId) {
+      setReviewNotice('This interview has no interview ID; annotations were not imported.');
+      return;
+    }
+    const clientId = session.gaze?.client_id;
+
+    try {
+      const tables = await Promise.all(Array.from(files, async (file) => parseAnnotationCsv(await file.text())));
+      const plan = buildAnnotationImportPlan(
+        tables,
+        interviewId,
+        plotFrames.map((frame) => ({ index: frame.index, timestamp: frame.t })),
+        violationInstances.map(({ key, record, index }) => ({
+          key,
+          violationId: record.id,
+          instanceNumber: index + 1,
+        }))
+      );
+      if ((plan.hasDotsFile && plan.dotMatched === 0) || (plan.hasInstancesFile && plan.instanceMatched === 0)) {
+        throw new Error('No CSV rows matched this interview; existing annotations were kept.');
+      }
+
+      const nextDots = plan.hasDotsFile ? plan.dotReviews : dotReviews;
+      const nextInstances = plan.hasInstancesFile ? plan.instanceReviews : instanceReviews;
+      if (plan.hasDotsFile) setDotReviews(nextDots);
+      if (plan.hasInstancesFile) {
+        setInstanceReviews(nextInstances);
+        setInstanceNoteDrafts({});
+      }
+      const saved = persistReviewSet(clientId, interviewId, {
+        dots: nextDots,
+        instances: nextInstances,
+      });
+      const importedCount = plan.dotMatched + plan.instanceMatched;
+      const unmatchedText = plan.unmatched ? `; ${plan.unmatched} rows did not match` : '';
+      setReviewNotice(
+        saved
+          ? `Imported ${importedCount} annotations${unmatchedText}.`
+          : `Imported ${importedCount} annotations${unmatchedText}; browser storage is unavailable, so they are active for this tab only.`
+      );
+    } catch (e) {
+      setReviewNotice(e instanceof Error ? e.message : 'Could not import annotations; existing annotations were kept.');
     }
   };
 
@@ -551,34 +702,46 @@ export default function App() {
 
   const saveDotAnnotation = () => {
     if (!annotationPopup) return;
-    setDotReviews((current) => {
-      const next = { ...current };
-      for (const frame of annotationPopup.frames) {
-        const previous = next[frame.index] ?? { status: null, note: '' };
-        const annotation = {
-          status: annotationDraft.status ?? previous.status,
-          note: annotationNoteChanged ? annotationDraft.note.trim() : previous.note,
-        };
-        if (annotation.status == null && !annotation.note) delete next[frame.index];
-        else next[frame.index] = annotation;
-      }
-      return next;
-    });
+    const next = { ...dotReviews };
+    for (const frame of annotationPopup.frames) {
+      const previous = next[frame.index] ?? { status: null, note: '' };
+      const annotation = {
+        status: annotationDraft.status ?? previous.status,
+        note: annotationNoteChanged ? annotationDraft.note.trim() : previous.note,
+      };
+      if (annotation.status == null && !annotation.note) delete next[frame.index];
+      else next[frame.index] = annotation;
+    }
+    setDotReviews(next);
+    setReviewNotice(
+      persistReviewSection(session?.gaze?.client_id, session?.gaze?.interview_id, 'dots', next)
+        ? null
+        : 'Annotations are active for this tab but could not be saved in browser storage.'
+    );
     setAnnotationPopup(null);
   };
 
   const markViolationInstance = (key: string, status: ReviewStatus) => {
-    setInstanceReviews((current) => ({
-      ...current,
-      [key]: { status, note: current[key]?.note ?? '' },
-    }));
+    const next = { ...instanceReviews, [key]: { status, note: instanceReviews[key]?.note ?? '' } };
+    setInstanceReviews(next);
+    setReviewNotice(
+      persistReviewSection(session?.gaze?.client_id, session?.gaze?.interview_id, 'instances', next)
+        ? null
+        : 'Annotations are active for this tab but could not be saved in browser storage.'
+    );
   };
 
   const saveInstanceNote = (key: string) => {
-    setInstanceReviews((current) => ({
-      ...current,
-      [key]: { status: current[key]?.status ?? null, note: instanceNoteDrafts[key]?.trim() ?? '' },
-    }));
+    const next = {
+      ...instanceReviews,
+      [key]: { status: instanceReviews[key]?.status ?? null, note: instanceNoteDrafts[key]?.trim() ?? '' },
+    };
+    setInstanceReviews(next);
+    setReviewNotice(
+      persistReviewSection(session?.gaze?.client_id, session?.gaze?.interview_id, 'instances', next)
+        ? null
+        : 'Annotations are active for this tab but could not be saved in browser storage.'
+    );
   };
 
   const exportDotReviews = () => {
@@ -730,15 +893,22 @@ export default function App() {
             <input type="file" multiple hidden accept=".mp4,.json,.jpg,.jpeg" onChange={(e) => onFiles(e.target.files)} />
           </label>
           {session?.videoUrl && (
-            <label className="btn secondary" title={violationDump?.fileName ?? 'Open a proctoring violations JSON dump'}>
-              {violationDump ? `Violations (${violationInstances.length})` : 'Open violations'}
-              <input type="file" hidden accept=".json,application/json" onChange={(e) => onViolationFile(e.target.files?.[0] ?? null)} />
-            </label>
+            <>
+              <label className="btn secondary" title={violationDump?.fileName ?? 'Open a proctoring violations JSON dump'}>
+                {violationDump ? `Violations (${violationInstances.length})` : 'Open violations'}
+                <input type="file" hidden accept=".json,application/json" onChange={(e) => onViolationFile(e.target.files?.[0] ?? null)} />
+              </label>
+              <label className="btn secondary">
+                Import annotations
+                <input type="file" hidden multiple accept=".csv,text/csv" onChange={(e) => onAnnotationFiles(e.target.files)} />
+              </label>
+            </>
           )}
         </div>
       </header>
 
       {loadError && <p className="error">{loadError}</p>}
+      {reviewNotice && <p className="review-notice" role="status">{reviewNotice}</p>}
       {session && <p className="session-label">{session.label}</p>}
 
       {!session && <div className="empty">Open folder or files to begin.</div>}
@@ -889,6 +1059,22 @@ export default function App() {
                 >
                   <span className={`lock-icon${snapshotLocked ? ' is-locked' : ''}`} aria-hidden="true" />
                 </button>
+              </div>
+              <div className="manual-filter" role="group" aria-label="Manual annotation filters">
+                <span className="manual-filter-heading">Manual annotation</span>
+                {REVIEW_TAGS.map(({ value, label }) => (
+                  <label key={value}>
+                    <input
+                      type="checkbox"
+                      checked={manualAnnotationFilters[value]}
+                      onChange={(e) => setManualAnnotationFilters((current) => ({
+                        ...current,
+                        [value]: e.target.checked,
+                      }))}
+                    />
+                    {label}
+                  </label>
+                ))}
               </div>
               <div className="scatter-wrap" ref={scatterWrapRef}>
                 <canvas
