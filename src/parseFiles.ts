@@ -273,6 +273,26 @@ export function buildPlotFrames(gaze: GazeResultFile | null): PlotFrame[] {
     });
 }
 
+export function modeAngle(values: number[]): number | null {
+  const frequencies = new Map<number, number>();
+  let mode: number | null = null;
+  let highestFrequency = 0;
+
+  for (const value of values) {
+    if (!Number.isFinite(value)) continue;
+    const binStart = Math.floor(value / 4) * 4;
+    const binCenter = binStart + 2;
+    const frequency = (frequencies.get(binCenter) ?? 0) + 1;
+    frequencies.set(binCenter, frequency);
+    if (frequency > highestFrequency) {
+      mode = binCenter;
+      highestFrequency = frequency;
+    }
+  }
+
+  return mode;
+}
+
 export const CALIB_COLORS: Record<string, string> = {
   top_left: '#e57373',
   top_center: '#f06292',

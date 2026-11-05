@@ -285,6 +285,7 @@ video {
 }
 
 .scatter-wrap {
+  position: relative;
   flex: 1;
   min-height: 320px;
   min-width: 0;
@@ -295,6 +296,14 @@ video {
   height: 100%;
   display: block;
   cursor: crosshair;
+}
+
+.lasso-selection {
+  position: absolute;
+  z-index: 2;
+  border: 1px dashed #0f766e;
+  background: rgb(15 118 110 / 10%);
+  pointer-events: none;
 }
 
 .distance-plot {
@@ -558,6 +567,24 @@ video {
   gap: 0.2rem;
 }
 
+.instance-note-control {
+  flex: 1 1 10rem;
+  min-width: 8rem;
+  display: flex;
+  gap: 0.25rem;
+}
+
+.instance-note-control input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.35rem;
+  border: 1px solid #d4dde7;
+  border-radius: 5px;
+  color: #334155;
+  font: inherit;
+  font-size: 0.68rem;
+}
+
 .instance-annotations .annotation-choice {
   min-width: 3.8rem;
   padding: 0.25rem 0.2rem;
@@ -808,6 +835,7 @@ video {
 }
 
 .annotation-choice,
+.annotation-save,
 .annotation-close {
   border: 1px solid #d4dde7;
   border-radius: 5px;
@@ -823,6 +851,7 @@ video {
 }
 
 .annotation-choice:hover,
+.annotation-save:hover:not(:disabled),
 .annotation-close:hover {
   background: #f4f7fa;
 }
@@ -854,8 +883,39 @@ video {
 
 .annotation-footer {
   display: flex;
+  align-items: center;
+  gap: 0.35rem;
   justify-content: space-between;
   margin-top: 0.45rem;
+}
+
+.annotation-note-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.4rem;
+  color: #64748b;
+}
+
+.annotation-note-label textarea {
+  width: 100%;
+  min-height: 2.8rem;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid #d4dde7;
+  border-radius: 5px;
+  background: #fff;
+  color: #334155;
+  font: inherit;
+  resize: vertical;
+}
+
+.annotation-save {
+  padding: 0.25rem 0.55rem;
+}
+
+.annotation-save:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .annotation-close {
@@ -902,7 +962,8 @@ code {
   }
 
   .violation-seek,
-  .instance-annotations {
+  .instance-annotations,
+  .instance-note-control {
     flex-basis: 100%;
   }
 }

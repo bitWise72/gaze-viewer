@@ -6,11 +6,13 @@ import {
   frameAtTime,
   frameTime,
   loadFromFileList,
+  modeAngle,
   parseViolationDump,
 } from './parseFiles';
 import {
   drawDistancePlot,
   drawYawPitchPlot,
+  framesInScatterRect,
   hitTestDistance,
   hitTestScatter,
   type HoverHit,
@@ -30,9 +32,21 @@ const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3];
 type ReviewStatus = 'correct' | 'incorrect' | 'unsure';
 
 interface AnnotationPopup {
-  frame: PlotFrame;
+  frames: PlotFrame[];
   x: number;
   y: number;
+}
+
+interface ReviewAnnotation {
+  status: ReviewStatus | null;
+  note: string;
+}
+
+interface LassoRectangle {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
 interface UploadedViolationDump {
@@ -55,9 +69,9 @@ function downloadCsv(filename: string, header: string[], rows: (string | number 
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function reviewProgress(statuses: object) {
-  const decided = (Object.values(statuses) as unknown[]).filter(
-    (status): status is Exclude<ReviewStatus, 'unsure'> => status === 'correct' || status === 'incorrect'
+function reviewProgress(annotations: Record<string, ReviewAnnotation>) {
+  const decided = Object.values(annotations).map((annotation) => annotation.status).filter(
+    (status): status is Exclude<ReviewStatus, 'unsure' | null> => status === 'correct' || status === 'incorrect'
   );
   const correct = decided.filter((status) => status === 'correct').length;
   return {
@@ -144,15 +158,23 @@ export default function App() {
   const [videoSource, setVideoSource] = useState<'camera' | 'screen'>('camera');
   const [simPlaying, setSimPlaying] = useState(false);
   const [snapshotLocked, setSnapshotLocked] = useState(false);
-  const [dotReviews, setDotReviews] = useState<Record<number, ReviewStatus>>({});
-  const [instanceReviews, setInstanceReviews] = useState<Record<string, ReviewStatus>>({});
+  const [dotReviews, setDotReviews] = useState<Record<number, ReviewAnnotation>>({});
+  const [instanceReviews, setInstanceReviews] = useState<Record<string, ReviewAnnotation>>({});
+  const [instanceNoteDrafts, setInstanceNoteDrafts] = useState<Record<string, string>>({});
   const [annotationPopup, setAnnotationPopup] = useState<AnnotationPopup | null>(null);
+  const [annotationDraft, setAnnotationDraft] = useState<ReviewAnnotation>({ status: null, note: '' });
+  const [selectedDotIndices, setSelectedDotIndices] = useState<number[]>([]);
+  const [lassoRectangle, setLassoRectangle] = useState<LassoRectangle | null>(null);
+  const [isLassoing, setIsLassoing] = useState(false);
   const [violationDump, setViolationDump] = useState<UploadedViolationDump | null>(null);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
   const [calibPreview, setCalibPreview] = useState<CalibPreview | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoSwitchTimeRef = useRef(0);
+  const lassoStartRef = useRef<{ clientX: number; clientY: number; localX: number; localY: number } | null>(null);
+  const lassoMovedRef = useRef(false);
+  const skipScatterClickRef = useRef(false);
   const scatterWrapRef = useRef<HTMLDivElement>(null);
   const scatterRef = useRef<HTMLCanvasElement>(null);
   const lineRef = useRef<HTMLCanvasElement>(null);
@@ -161,8 +183,8 @@ export default function App() {
 
   const plotFrames = useMemo(() => buildPlotFrames(session?.gaze ?? null), [session?.gaze]);
   const calibPoints = session?.gaze?.calibration?.points ?? [];
-  const modeYaw = session?.gaze?.calibration?.mode?.yaw ?? null;
-  const modePitch = session?.gaze?.calibration?.mode?.pitch ?? null;
+  const modeYaw = useMemo(() => modeAngle(plotFrames.map((frame) => frame.yaw)), [plotFrames]);
+  const modePitch = useMemo(() => modeAngle(plotFrames.map((frame) => frame.pitch)), [plotFrames]);
   const reference = session?.gaze?.calibration?.reference ?? null;
   const limits = session?.gaze?.calibration?.limits ?? null;
   const timelineDuration = videoDuration || plotFrames.at(-1)?.t || 0;
@@ -186,7 +208,7 @@ export default function App() {
   );
   const dotProgress = reviewProgress(dotReviews);
   const instanceProgress = reviewProgress(
-    Object.fromEntries(violationInstances.map(({ key }) => [key, instanceReviews[key]]))
+    Object.fromEntries(violationInstances.flatMap(({ key }) => instanceReviews[key] ? [[key, instanceReviews[key]]] : []))
   );
 
   const hasCalibImages = (session?.calibrationImages.size ?? 0) > 0;
@@ -210,12 +232,13 @@ export default function App() {
       reference,
       limits,
       snapshot: snapshotLocked,
+      selectedFrameIndices: selectedDotIndices,
       currentTime,
       width: w,
       height: h,
       title: 'Yaw / pitch',
     };
-  }, [plotFrames, calibPoints, modeYaw, modePitch, reference, limits, snapshotLocked, currentTime]);
+  }, [plotFrames, calibPoints, modeYaw, modePitch, reference, limits, snapshotLocked, selectedDotIndices, currentTime]);
 
   const lineOpts = useCallback((): LineDrawOptions | null => {
     const col = leftColRef.current;
@@ -354,7 +377,10 @@ export default function App() {
       setVideoSource('camera');
       setCalibPreview(null);
       setDotReviews({});
+      setSelectedDotIndices([]);
       setAnnotationPopup(null);
+      setInstanceReviews({});
+      setInstanceNoteDrafts({});
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : 'Failed to load');
     }
@@ -392,29 +418,119 @@ export default function App() {
     }
   };
 
+  const openDotAnnotation = (frames: PlotFrame[], clientX: number, clientY: number, seekToPoint: boolean) => {
+    if (!frames.length) return;
+    const saved = frames.map((frame) => dotReviews[frame.index] ?? { status: null, note: '' });
+    const first = saved[0];
+    setAnnotationDraft({
+      status: saved.every((annotation) => annotation.status === first.status) ? first.status : null,
+      note: saved.every((annotation) => annotation.note === first.note) ? first.note : '',
+    });
+    setSelectedDotIndices(frames.map((frame) => frame.index));
+    if (seekToPoint) seekToTime(frames[0].t);
+    setAnnotationPopup({
+      frames,
+      x: Math.max(12, Math.min(clientX + 10, window.innerWidth - 300)),
+      y: Math.max(12, Math.min(clientY + 10, window.innerHeight - 250)),
+    });
+  };
+
   const onScatterClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (skipScatterClickRef.current) {
+      skipScatterClickRef.current = false;
+      return;
+    }
     const sOpts = scatterOpts();
     const canvas = scatterRef.current;
     if (!sOpts || !canvas) return;
     const hit = hitTestScatter(sOpts, e.clientX, e.clientY, canvas);
     if (hit?.kind === 'frame') {
-      seekToTime(hit.frame.t);
-      setAnnotationPopup({
-        frame: hit.frame,
-        x: Math.max(12, Math.min(e.clientX + 10, window.innerWidth - 270)),
-        y: Math.max(12, Math.min(e.clientY + 10, window.innerHeight - 170)),
-      });
+      openDotAnnotation([hit.frame], e.clientX, e.clientY, true);
     } else {
+      setSelectedDotIndices([]);
       setAnnotationPopup(null);
     }
   };
 
-  const markDot = (frame: PlotFrame, status: ReviewStatus) => {
-    setDotReviews((current) => ({ ...current, [frame.index]: status }));
+  const onScatterMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    lassoStartRef.current = {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      localX: e.clientX - rect.left,
+      localY: e.clientY - rect.top,
+    };
+    lassoMovedRef.current = false;
+    setIsLassoing(true);
+  };
+
+  const updateLasso = (clientX: number, clientY: number) => {
+    const start = lassoStartRef.current;
+    if (!start) return;
+    const canvas = scatterRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const localX = clientX - rect.left;
+    const localY = clientY - rect.top;
+    if (Math.hypot(clientX - start.clientX, clientY - start.clientY) > 5) {
+      lassoMovedRef.current = true;
+      setLassoRectangle({
+        left: Math.min(start.localX, localX),
+        top: Math.min(start.localY, localY),
+        width: Math.abs(localX - start.localX),
+        height: Math.abs(localY - start.localY),
+      });
+    }
+  };
+
+  const finishLasso = (clientX: number, clientY: number) => {
+    const start = lassoStartRef.current;
+    lassoStartRef.current = null;
+    setLassoRectangle(null);
+    setIsLassoing(false);
+    if (!start || !lassoMovedRef.current) return;
+
+    lassoMovedRef.current = false;
+    skipScatterClickRef.current = true;
+    const opts = scatterOpts();
+    const canvas = scatterRef.current;
+    if (!opts || !canvas) return;
+    const frames = framesInScatterRect(opts, canvas, start.clientX, start.clientY, clientX, clientY);
+    if (frames.length) openDotAnnotation(frames, clientX, clientY, false);
+    else {
+      setSelectedDotIndices([]);
+      setAnnotationPopup(null);
+    }
+  };
+
+  const saveDotAnnotation = () => {
+    if (!annotationPopup) return;
+    setDotReviews((current) => {
+      const next = { ...current };
+      for (const frame of annotationPopup.frames) {
+        const previous = next[frame.index] ?? { status: null, note: '' };
+        const annotation = { status: annotationDraft.status ?? previous.status, note: annotationDraft.note.trim() };
+        if (annotation.status == null && !annotation.note) delete next[frame.index];
+        else next[frame.index] = annotation;
+      }
+      return next;
+    });
+    setAnnotationPopup(null);
   };
 
   const markViolationInstance = (key: string, status: ReviewStatus) => {
-    setInstanceReviews((current) => ({ ...current, [key]: status }));
+    setInstanceReviews((current) => ({
+      ...current,
+      [key]: { status, note: current[key]?.note ?? '' },
+    }));
+  };
+
+  const saveInstanceNote = (key: string) => {
+    setInstanceReviews((current) => ({
+      ...current,
+      [key]: { status: current[key]?.status ?? null, note: instanceNoteDrafts[key]?.trim() ?? '' },
+    }));
   };
 
   const exportReviews = () => {
@@ -423,18 +539,19 @@ export default function App() {
       [
         'record_type', 'interview_id', 'violation_id', 'violation_type', 'severity', 'instance_number',
         'timestamp_seconds', 'end_seconds', 'duration_seconds', 'yaw', 'pitch', 'confidence',
-        'frame_name', 'frame_timestamp_seconds', 'dyaw', 'dpitch', 'axis', 'prediction', 'annotation',
+        'frame_name', 'frame_timestamp_seconds', 'dyaw', 'dpitch', 'axis', 'prediction', 'annotation', 'note',
       ],
       [
         ...plotFrames.map((frame) => [
           'gaze_dot', session?.gaze?.interview_id ?? '', '', '', '', '', frame.t, '', '',
-          frame.yaw, frame.pitch, '', '', '', '', '', frame.pred ?? '', dotReviews[frame.index] ?? '',
+          frame.yaw, frame.pitch, '', '', '', '', '', frame.pred ?? '',
+          dotReviews[frame.index]?.status ?? '', dotReviews[frame.index]?.note ?? '',
         ]),
         ...violationInstances.map(({ key, record, instance, index }) => [
           'violation_instance', record.interviewId, record.id, record.type, record.severity, index + 1,
           instance.startSeconds, instance.endSeconds, instance.durationSeconds, '', '', instance.confidence,
           instance.frameName, instance.frameTimeSeconds, instance.dyaw, instance.dpitch, instance.axis, '',
-          instanceReviews[key] ?? '',
+          instanceReviews[key]?.status ?? '', instanceReviews[key]?.note ?? '',
         ]),
       ]
     );
@@ -458,12 +575,21 @@ export default function App() {
   };
 
   const onScatterMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (lassoStartRef.current) {
+      updateLasso(e.clientX, e.clientY);
+      setTooltip(null);
+      return;
+    }
     const sOpts = scatterOpts();
     const canvas = scatterRef.current;
     if (!sOpts || !canvas) return;
     const hit = hitTestScatter(sOpts, e.clientX, e.clientY, canvas);
     if (hit) setTooltip({ x: e.clientX + 12, y: e.clientY + 12, text: hoverText(hit) });
     else setTooltip(null);
+  };
+
+  const onScatterMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    finishLasso(e.clientX, e.clientY);
   };
 
   const onLineMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -690,9 +816,24 @@ export default function App() {
                   ref={scatterRef}
                   className="plot scatter-plot"
                   onClick={onScatterClick}
+                  onMouseDown={onScatterMouseDown}
                   onMouseMove={onScatterMove}
-                  onMouseLeave={() => setTooltip(null)}
+                  onMouseUp={onScatterMouseUp}
+                  onMouseLeave={() => {
+                    if (!isLassoing) setTooltip(null);
+                  }}
                 />
+                {lassoRectangle && (
+                  <div
+                    className="lasso-selection"
+                    style={{
+                      left: lassoRectangle.left,
+                      top: lassoRectangle.top,
+                      width: lassoRectangle.width,
+                      height: lassoRectangle.height,
+                    }}
+                  />
+                )}
               </div>
               <div className="legend legend-wrap">
                 <span>
@@ -724,7 +865,7 @@ export default function App() {
               </div>
               {violationInstances.length ? (
                 <div className="violation-list">
-                  {violationInstances.map(({ key, record, instance }) => (
+                  {violationInstances.map(({ key, record, instance, index }) => (
                     <div className="violation-row" key={key}>
                       <button
                         type="button"
@@ -746,13 +887,30 @@ export default function App() {
                           <button
                             key={status}
                             type="button"
-                            className={`annotation-choice status-${status}${instanceReviews[key] === status ? ' is-selected' : ''}`}
-                            aria-pressed={instanceReviews[key] === status}
+                            className={`annotation-choice status-${status}${instanceReviews[key]?.status === status ? ' is-selected' : ''}`}
+                            aria-pressed={instanceReviews[key]?.status === status}
                             onClick={() => markViolationInstance(key, status)}
                           >
                             {status[0].toUpperCase() + status.slice(1)}
                           </button>
                         ))}
+                      </div>
+                      <div className="instance-note-control">
+                        <input
+                          type="text"
+                          value={instanceNoteDrafts[key] ?? instanceReviews[key]?.note ?? ''}
+                          aria-label={`Note for violation ${index + 1}`}
+                          placeholder="Note"
+                          onChange={(e) => setInstanceNoteDrafts((current) => ({ ...current, [key]: e.target.value }))}
+                        />
+                        <button
+                          type="button"
+                          className="annotation-save"
+                          onClick={() => saveInstanceNote(key)}
+                          disabled={(instanceNoteDrafts[key] ?? instanceReviews[key]?.note ?? '') === (instanceReviews[key]?.note ?? '')}
+                        >
+                          Save
+                        </button>
                       </div>
                     </div>
                   ))}
@@ -791,25 +949,43 @@ export default function App() {
           className="annotation-popup"
           style={{ left: annotationPopup.x, top: annotationPopup.y }}
           role="dialog"
-          aria-label="Annotate gaze point"
+          aria-label={annotationPopup.frames.length > 1 ? 'Annotate selected gaze points' : 'Annotate gaze point'}
         >
           <div className="annotation-point">
-            {formatTime(annotationPopup.frame.t)} · y={fmt(annotationPopup.frame.yaw)} · p={fmt(annotationPopup.frame.pitch)}
+            {annotationPopup.frames.length > 1
+              ? `${annotationPopup.frames.length} points selected`
+              : `${formatTime(annotationPopup.frames[0].t)} · y=${fmt(annotationPopup.frames[0].yaw)} · p=${fmt(annotationPopup.frames[0].pitch)}`}
           </div>
           <div className="annotation-actions">
             {(['correct', 'incorrect', 'unsure'] as const).map((status) => (
               <button
                 key={status}
                 type="button"
-                className={`annotation-choice status-${status}${dotReviews[annotationPopup.frame.index] === status ? ' is-selected' : ''}`}
-                aria-pressed={dotReviews[annotationPopup.frame.index] === status}
-                onClick={() => markDot(annotationPopup.frame, status)}
+                className={`annotation-choice status-${status}${annotationDraft.status === status ? ' is-selected' : ''}`}
+                aria-pressed={annotationDraft.status === status}
+                onClick={() => setAnnotationDraft((current) => ({ ...current, status }))}
               >
                 {status[0].toUpperCase() + status.slice(1)}
               </button>
             ))}
           </div>
+          <label className="annotation-note-label">
+            Note
+            <textarea
+              value={annotationDraft.note}
+              onChange={(e) => setAnnotationDraft((current) => ({ ...current, note: e.target.value }))}
+              rows={2}
+            />
+          </label>
           <div className="annotation-footer">
+            <button
+              type="button"
+              className="annotation-save"
+              onClick={saveDotAnnotation}
+              disabled={annotationDraft.status == null && !annotationDraft.note.trim()}
+            >
+              Save
+            </button>
             <button type="button" className="annotation-close" onClick={() => setAnnotationPopup(null)} aria-label="Close annotation">
               ×
             </button>

@@ -9,6 +9,7 @@ export interface ScatterDrawOptions {
   reference: GazeReference | null;
   limits: GazeLimits | null;
   snapshot: boolean;
+  selectedFrameIndices?: number[];
   currentTime: number;
   width: number;
   height: number;
@@ -186,10 +187,18 @@ export function drawYawPitchPlot(canvas: HTMLCanvasElement, opts: ScatterDrawOpt
     const x = toX(f.yaw);
     const y = toY(f.pitch);
     const fill = f.isGazeOut ? '#ef4444' : '#64748b';
+    const selected = opts.selectedFrameIndices?.includes(f.index) ?? false;
     ctx.beginPath();
-    ctx.arc(x, y, f.isGazeOut ? 4.5 : 3.5, 0, Math.PI * 2);
+    ctx.arc(x, y, selected ? 6.5 : f.isGazeOut ? 4.5 : 3.5, 0, Math.PI * 2);
     ctx.fillStyle = fill;
     ctx.fill();
+    if (selected) {
+      ctx.beginPath();
+      ctx.arc(x, y, 9, 0, Math.PI * 2);
+      ctx.strokeStyle = '#0f766e';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
   }
 
   opts.calibPoints.forEach((c, i) => {
@@ -259,6 +268,33 @@ export function hitTestScatter(
     if (d <= r && (!best || d < best.d)) best = { frame: f, d };
   }
   return best ? { kind: 'frame', frame: best.frame } : null;
+}
+
+export function framesInScatterRect(
+  opts: ScatterDrawOptions,
+  canvas: HTMLCanvasElement,
+  startClientX: number,
+  startClientY: number,
+  endClientX: number,
+  endClientY: number
+): PlotFrame[] {
+  const start = pointerToPlot(canvas, opts.width, opts.height, startClientX, startClientY);
+  const end = pointerToPlot(canvas, opts.width, opts.height, endClientX, endClientY);
+  const left = Math.min(start.x, end.x);
+  const right = Math.max(start.x, end.x);
+  const top = Math.min(start.y, end.y);
+  const bottom = Math.max(start.y, end.y);
+  const bounds = computeBounds(opts.frames, opts.calibPoints, opts.modeYaw, opts.modePitch, opts.reference, opts.limits);
+  const { toX, toY } = scatterTransform(opts.width, opts.height, bounds);
+  const visible = opts.snapshot
+    ? opts.frames
+    : opts.frames.filter((frame) => frame.t <= opts.currentTime + 0.05);
+
+  return visible.filter((frame) => {
+    const x = toX(frame.yaw);
+    const y = toY(frame.pitch);
+    return x >= left && x <= right && y >= top && y <= bottom;
+  });
 }
 
 function lineTransform(w: number, h: number, maxT: number, maxD: number) {
