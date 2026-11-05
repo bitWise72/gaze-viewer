@@ -141,6 +141,7 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
   const [playbackRate, setPlaybackRate] = useState(1);
+  const [videoSource, setVideoSource] = useState<'camera' | 'screen'>('camera');
   const [simPlaying, setSimPlaying] = useState(false);
   const [snapshotLocked, setSnapshotLocked] = useState(false);
   const [dotReviews, setDotReviews] = useState<Record<number, ReviewStatus>>({});
@@ -151,6 +152,7 @@ export default function App() {
   const [calibPreview, setCalibPreview] = useState<CalibPreview | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoSwitchTimeRef = useRef(0);
   const scatterWrapRef = useRef<HTMLDivElement>(null);
   const scatterRef = useRef<HTMLCanvasElement>(null);
   const lineRef = useRef<HTMLCanvasElement>(null);
@@ -164,6 +166,10 @@ export default function App() {
   const reference = session?.gaze?.calibration?.reference ?? null;
   const limits = session?.gaze?.calibration?.limits ?? null;
   const timelineDuration = videoDuration || plotFrames.at(-1)?.t || 0;
+  const hasVideoSourceToggle = Boolean(session?.cameraVideoUrl && session.screenVideoUrl);
+  const activeVideoUrl = hasVideoSourceToggle
+    ? videoSource === 'camera' ? session?.cameraVideoUrl ?? null : session?.screenVideoUrl ?? null
+    : session?.videoUrl ?? null;
   const matchedViolations = useMemo(() => {
     const interviewId = session?.gaze?.interview_id;
     if (!interviewId || !violationDump) return [];
@@ -242,7 +248,7 @@ export default function App() {
   }, [redraw]);
 
   useEffect(() => {
-    if (!simPlaying || session?.videoUrl) return;
+    if (!simPlaying || activeVideoUrl) return;
     let raf = 0;
     let last = performance.now();
     const tick = (now: number) => {
@@ -260,13 +266,13 @@ export default function App() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [simPlaying, session?.videoUrl, playbackRate, timelineDuration]);
+  }, [simPlaying, activeVideoUrl, playbackRate, timelineDuration]);
 
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
     v.playbackRate = playbackRate;
-  }, [playbackRate, session?.videoUrl]);
+  }, [playbackRate, activeVideoUrl]);
 
   const calibPreviewItems = useMemo((): CalibPreview[] => {
     if (!session || !hasCalibImages) return [];
@@ -318,21 +324,34 @@ export default function App() {
 
   const seekToTime = (t: number) => {
     const v = videoRef.current;
-    if (v && session?.videoUrl) {
+    if (v && activeVideoUrl) {
       v.pause();
       v.currentTime = t;
     }
     setCurrentTime(t);
   };
 
+  const selectVideoSource = (source: 'camera' | 'screen') => {
+    if (source === videoSource) return;
+    videoSwitchTimeRef.current = videoRef.current?.currentTime ?? currentTime;
+    videoRef.current?.pause();
+    setVideoDuration(0);
+    setVideoSource(source);
+  };
+
   const onFiles = async (files: FileList | null) => {
     if (!files?.length) return;
     setLoadError(null);
     try {
-      if (session?.videoUrl) URL.revokeObjectURL(session.videoUrl);
+      new Set([session?.videoUrl, session?.cameraVideoUrl, session?.screenVideoUrl]
+        .filter((url): url is string => Boolean(url)))
+        .forEach((url) => URL.revokeObjectURL(url));
       session?.calibrationImages.forEach((u) => URL.revokeObjectURL(u));
       setSession(await loadFromFileList(files));
       setCurrentTime(0);
+      setVideoDuration(0);
+      videoSwitchTimeRef.current = 0;
+      setVideoSource('camera');
       setCalibPreview(null);
       setDotReviews({});
       setAnnotationPopup(null);
@@ -533,23 +552,47 @@ export default function App() {
           <div className="main-grid">
             <div className="left-col" ref={leftColRef}>
               <section className="video-pane">
-                {session.videoUrl ? (
+                {activeVideoUrl ? (
                   <>
                     <div className="video-wrap">
                       <video
+                        key={activeVideoUrl}
                         ref={videoRef}
-                        src={session.videoUrl}
+                        src={activeVideoUrl}
                         controls
                         onTimeUpdate={onTimeUpdate}
                         onSeeked={onTimeUpdate}
                         onLoadedMetadata={() => {
                           const v = videoRef.current;
-                          if (v) setVideoDuration(v.duration);
-                          onTimeUpdate();
+                          if (v) {
+                            const seekTime = Math.min(videoSwitchTimeRef.current, v.duration);
+                            v.currentTime = seekTime;
+                            setVideoDuration(v.duration);
+                            setCurrentTime(seekTime);
+                            videoSwitchTimeRef.current = seekTime;
+                          }
                         }}
                       />
                     </div>
                     <div className="video-controls">
+                      {hasVideoSourceToggle && (
+                        <div className="video-source-toggle" role="group" aria-label="Video source">
+                          <button
+                            type="button"
+                            aria-pressed={videoSource === 'camera'}
+                            onClick={() => selectVideoSource('camera')}
+                          >
+                            Camera
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={videoSource === 'screen'}
+                            onClick={() => selectVideoSource('screen')}
+                          >
+                            Screen
+                          </button>
+                        </div>
+                      )}
                       <label>
                         Speed
                         <select value={playbackRate} onChange={(e) => setPlaybackRate(Number(e.target.value))}>

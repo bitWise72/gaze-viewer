@@ -47,6 +47,8 @@ export interface GazeResultFile {
 export interface LoadedSession {
   label: string;
   videoUrl: string | null;
+  cameraVideoUrl: string | null;
+  screenVideoUrl: string | null;
   gaze: GazeResultFile | null;
   calibrationImages: Map<string, string>;
 }

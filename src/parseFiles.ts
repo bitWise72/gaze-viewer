@@ -167,7 +167,9 @@ function parentFolder(path: string): string {
 }
 
 export async function loadFromFileList(files: FileList): Promise<LoadedSession> {
-  let videoFile: File | null = null;
+  let cameraFile: File | null = null;
+  let screenFile: File | null = null;
+  let fallbackVideoFile: File | null = null;
   let gazeFile: File | null = null;
   const calibFiles = new Map<string, File>();
 
@@ -176,9 +178,9 @@ export async function loadFromFileList(files: FileList): Promise<LoadedSession> 
     const name = baseName(f.name).toLowerCase();
     const rel = (f.webkitRelativePath || f.name).replace(/\\/g, '/').toLowerCase();
 
-    if (name.endsWith('_final_camera.mp4') || (name.endsWith('.mp4') && !videoFile)) {
-      if (name.includes('final_camera') || !videoFile) videoFile = f;
-    }
+    if (name.endsWith('_final_camera.mp4')) cameraFile = f;
+    if (name.endsWith('final_screen.mp4')) screenFile = f;
+    if (name.endsWith('.mp4') && !fallbackVideoFile) fallbackVideoFile = f;
     if (name === 'gaze_result.json') gazeFile = f;
     if (rel.includes('/calibration/') && /\.jpe?g$/i.test(name)) {
       const point = name.replace(/\.jpe?g$/i, '');
@@ -190,15 +192,7 @@ export async function loadFromFileList(files: FileList): Promise<LoadedSession> 
     }
   }
 
-  if (!videoFile) {
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      if (/\.mp4$/i.test(f.name)) {
-        videoFile = f;
-        break;
-      }
-    }
-  }
+  const videoFile = cameraFile ?? screenFile ?? fallbackVideoFile;
 
   let gaze: GazeResultFile | null = null;
   if (gazeFile) {
@@ -210,13 +204,19 @@ export async function loadFromFileList(files: FileList): Promise<LoadedSession> 
     calibrationImages.set(point, URL.createObjectURL(file));
   }
 
+  const cameraVideoUrl = cameraFile ? URL.createObjectURL(cameraFile) : null;
+  const screenVideoUrl = screenFile ? URL.createObjectURL(screenFile) : null;
+  const videoUrl = cameraVideoUrl ?? screenVideoUrl ?? (fallbackVideoFile ? URL.createObjectURL(fallbackVideoFile) : null);
+
   const label =
     gaze?.interview_id ??
     (videoFile ? parentFolder(videoFile.webkitRelativePath || videoFile.name) : 'interview');
 
   return {
     label,
-    videoUrl: videoFile ? URL.createObjectURL(videoFile) : null,
+    videoUrl,
+    cameraVideoUrl,
+    screenVideoUrl,
     gaze,
     calibrationImages,
   };
