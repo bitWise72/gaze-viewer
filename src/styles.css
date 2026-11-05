@@ -860,15 +860,15 @@ video {
   font-weight: 600;
 }
 
-.annotation-choice.status-correct:hover,
-.annotation-choice.status-correct.is-selected {
+.annotation-choice.status-gaze-in:hover,
+.annotation-choice.status-gaze-in.is-selected {
   border-color: #9ac9a7;
   background: #eaf6ed;
   color: #24643a;
 }
 
-.annotation-choice.status-incorrect:hover,
-.annotation-choice.status-incorrect.is-selected {
+.annotation-choice.status-gaze-out:hover,
+.annotation-choice.status-gaze-out.is-selected {
   border-color: #e0a19d;
   background: #fff0ef;
   color: #a52c2c;

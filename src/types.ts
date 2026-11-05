@@ -4,6 +4,10 @@ export interface GazeCalibrationPoint {
   reason?: string | null;
   gaze_yaw?: number | null;
   gaze_pitch?: number | null;
+  head_yaw?: number | null;
+  head_pitch?: number | null;
+  head_roll?: number | null;
+  method?: string | null;
 }
 
 export interface GazeReference {
@@ -36,6 +40,7 @@ export interface GazeResultFile {
   interview_id?: string;
   client_id?: string;
   calibration?: {
+    method?: string | null;
     reference?: GazeReference | null;
     mode?: GazeReference | null;
     limits?: GazeLimits | null;
@@ -77,6 +82,8 @@ export interface ProctoringViolationInstance {
   frameTimeSeconds: number | null;
   dyaw: number | null;
   dpitch: number | null;
+  referenceYaw: number | null;
+  referencePitch: number | null;
   axis: string | null;
 }
 

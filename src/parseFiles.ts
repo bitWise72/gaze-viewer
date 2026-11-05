@@ -117,6 +117,7 @@ function parseViolationInstances(value: unknown): ProctoringViolationInstance[] 
     const frames = asRecord(instance.frames);
     const snapshot = asRecord(instance.snapshot);
     const metadata = asRecord(instance.metadata);
+    const reference = asRecord(metadata.reference);
     const confirmedFrames = Array.isArray(metadata.confirmed_frames) ? metadata.confirmed_frames : [];
     const confirmedFrame = asRecord(confirmedFrames[0]);
     const frameStartMs = asNumber(frames.start);
@@ -133,6 +134,8 @@ function parseViolationInstances(value: unknown): ProctoringViolationInstance[] 
       frameTimeSeconds: asNumber(confirmedFrame.time_seconds) ?? asNumber(snapshot.time) ?? startSeconds,
       dyaw: asNumber(metadata.dyaw),
       dpitch: asNumber(metadata.dpitch),
+      referenceYaw: asNumber(reference.yaw),
+      referencePitch: asNumber(reference.pitch),
       axis: typeof metadata.axis === 'string' ? metadata.axis : null,
     };
   });

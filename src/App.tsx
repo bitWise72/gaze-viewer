@@ -29,7 +29,12 @@ import type {
 import './styles.css';
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3];
-type ReviewStatus = 'correct' | 'incorrect' | 'unsure';
+type ReviewStatus = 'gaze_in' | 'gaze_out' | 'unsure';
+const REVIEW_TAGS: { value: ReviewStatus; label: string }[] = [
+  { value: 'gaze_in', label: 'Gaze in' },
+  { value: 'gaze_out', label: 'Gaze out' },
+  { value: 'unsure', label: 'Unsure' },
+];
 
 interface AnnotationPopup {
   frames: PlotFrame[];
@@ -69,14 +74,23 @@ function downloadCsv(filename: string, header: string[], rows: (string | number 
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function reviewProgress(annotations: Record<string, ReviewAnnotation>) {
-  const decided = Object.values(annotations).map((annotation) => annotation.status).filter(
-    (status): status is Exclude<ReviewStatus, 'unsure' | null> => status === 'correct' || status === 'incorrect'
-  );
-  const correct = decided.filter((status) => status === 'correct').length;
+function gazeCategory(value: string | null | undefined): Exclude<ReviewStatus, 'unsure'> | null {
+  const normalized = value?.toLowerCase();
+  return normalized === 'gaze_in' || normalized === 'gaze_out' ? normalized : null;
+}
+
+function reviewProgress(annotations: object, predictions: Record<string, string | null>) {
+  const decided = Object.entries(annotations).filter(([key, rawAnnotation]) => {
+    const annotation = rawAnnotation as ReviewAnnotation;
+    return annotation.status != null && annotation.status !== 'unsure' &&
+      (predictions[key] === 'gaze_in' || predictions[key] === 'gaze_out');
+  });
+  const correct = decided.filter(([key, rawAnnotation]) =>
+    (rawAnnotation as ReviewAnnotation).status === predictions[key]
+  ).length;
   return {
     correct,
-    decided: decided.length,
+    evaluated: decided.length,
     percentage: decided.length ? Math.round((correct / decided.length) * 100) : null,
   };
 }
@@ -163,6 +177,7 @@ export default function App() {
   const [instanceNoteDrafts, setInstanceNoteDrafts] = useState<Record<string, string>>({});
   const [annotationPopup, setAnnotationPopup] = useState<AnnotationPopup | null>(null);
   const [annotationDraft, setAnnotationDraft] = useState<ReviewAnnotation>({ status: null, note: '' });
+  const [annotationNoteChanged, setAnnotationNoteChanged] = useState(false);
   const [selectedDotIndices, setSelectedDotIndices] = useState<number[]>([]);
   const [lassoRectangle, setLassoRectangle] = useState<LassoRectangle | null>(null);
   const [isLassoing, setIsLassoing] = useState(false);
@@ -207,9 +222,14 @@ export default function App() {
     }))),
     [matchedViolations]
   );
-  const dotProgress = reviewProgress(dotReviews);
+  const dotPredictions = Object.fromEntries(plotFrames.map((frame) => [String(frame.index), gazeCategory(frame.pred)]));
+  const instancePredictions = Object.fromEntries(
+    violationInstances.map(({ key, record }) => [key, gazeCategory(record.type)])
+  );
+  const dotProgress = reviewProgress(dotReviews, dotPredictions);
   const instanceProgress = reviewProgress(
-    Object.fromEntries(violationInstances.flatMap(({ key }) => instanceReviews[key] ? [[key, instanceReviews[key]]] : []))
+    Object.fromEntries(violationInstances.flatMap(({ key }) => instanceReviews[key] ? [[key, instanceReviews[key]]] : [])),
+    instancePredictions
   );
 
   const hasCalibImages = (session?.calibrationImages.size ?? 0) > 0;
@@ -380,6 +400,7 @@ export default function App() {
       setDotReviews({});
       setSelectedDotIndices([]);
       setAnnotationPopup(null);
+      setAnnotationNoteChanged(false);
       setInstanceReviews({});
       setInstanceNoteDrafts({});
     } catch (e) {
@@ -398,6 +419,7 @@ export default function App() {
         records,
       });
       setInstanceReviews({});
+      setInstanceNoteDrafts({});
     } catch (e) {
       setViolationDump(null);
       setLoadError(e instanceof Error ? e.message : 'Failed to load violation dump');
@@ -427,6 +449,7 @@ export default function App() {
       status: saved.every((annotation) => annotation.status === first.status) ? first.status : null,
       note: saved.every((annotation) => annotation.note === first.note) ? first.note : '',
     });
+    setAnnotationNoteChanged(false);
     setSelectedDotIndices(frames.map((frame) => frame.index));
     if (seekToPoint) seekToTime(frames[0].t);
     setAnnotationPopup({
@@ -494,6 +517,9 @@ export default function App() {
 
     lassoMovedRef.current = false;
     skipScatterClickRef.current = true;
+    window.setTimeout(() => {
+      skipScatterClickRef.current = false;
+    }, 0);
     const opts = scatterOpts();
     const canvas = scatterRef.current;
     if (!opts || !canvas) return;
@@ -529,7 +555,10 @@ export default function App() {
       const next = { ...current };
       for (const frame of annotationPopup.frames) {
         const previous = next[frame.index] ?? { status: null, note: '' };
-        const annotation = { status: annotationDraft.status ?? previous.status, note: annotationDraft.note.trim() };
+        const annotation = {
+          status: annotationDraft.status ?? previous.status,
+          note: annotationNoteChanged ? annotationDraft.note.trim() : previous.note,
+        };
         if (annotation.status == null && !annotation.note) delete next[frame.index];
         else next[frame.index] = annotation;
       }
@@ -552,27 +581,50 @@ export default function App() {
     }));
   };
 
-  const exportReviews = () => {
+  const exportDotReviews = () => {
     downloadCsv(
-      `${session?.label ?? 'interview'}-annotations.csv`,
-      [
-        'record_type', 'interview_id', 'violation_id', 'violation_type', 'severity', 'instance_number',
-        'timestamp_seconds', 'end_seconds', 'duration_seconds', 'yaw', 'pitch', 'confidence',
-        'frame_name', 'frame_timestamp_seconds', 'dyaw', 'dpitch', 'axis', 'prediction', 'annotation', 'note',
-      ],
-      [
-        ...plotFrames.map((frame) => [
-          'gaze_dot', session?.gaze?.interview_id ?? '', '', '', '', '', frame.t, '', '',
-          frame.yaw, frame.pitch, '', '', '', '', '', frame.pred ?? '',
-          dotReviews[frame.index]?.status ?? '', dotReviews[frame.index]?.note ?? '',
-        ]),
-        ...violationInstances.map(({ key, record, instance, index }) => [
-          'violation_instance', record.interviewId, record.id, record.type, record.severity, index + 1,
-          instance.startSeconds, instance.endSeconds, instance.durationSeconds, '', '', instance.confidence,
-          instance.frameName, instance.frameTimeSeconds, instance.dyaw, instance.dpitch, instance.axis, '',
+      `${session?.label ?? 'interview'}-dot-annotations.csv`,
+      ['record_type', 'interview_id', 'timestamp_seconds', 'yaw', 'pitch', 'Model Prediction', 'Human Verdict', 'Notes added'],
+      plotFrames.map((frame) => [
+        'gaze_dot',
+        session?.gaze?.interview_id ?? '',
+        frame.t,
+        frame.yaw,
+        frame.pitch,
+        frame.pred ?? '',
+        dotReviews[frame.index]?.status ?? '',
+        dotReviews[frame.index]?.note ?? '',
+      ])
+    );
+  };
+
+  const exportCalibrationReviews = () => {
+    const header = [
+      'instance_number', 'record_type', 'interview_id', 'violation_id', 'violation_type', 'severity',
+      'timestamp_seconds', 'end_seconds', 'duration_seconds', 'yaw', 'pitch', 'confidence', 'frame_name',
+      'frame_timestamp_seconds', 'dyaw', 'dpitch', 'axis', 'annotation', 'note',
+    ];
+    downloadCsv(
+      `${session?.label ?? 'interview'}-violation-instance-annotations.csv`,
+      header,
+      violationInstances.map(({ key, record, instance, index }) => {
+        const gazeFrame = session?.gaze?.frames?.find((frame) =>
+          (instance.frameName != null && frame.frame_name === instance.frameName) ||
+          (instance.frameTimeSeconds != null && Math.abs(frameTime(frame) - instance.frameTimeSeconds) < 0.01)
+        );
+        const yaw = gazeFrame?.gaze_yaw ?? (
+          instance.referenceYaw != null && instance.dyaw != null ? instance.referenceYaw + instance.dyaw : ''
+        );
+        const pitch = gazeFrame?.gaze_pitch ?? (
+          instance.referencePitch != null && instance.dpitch != null ? instance.referencePitch + instance.dpitch : ''
+        );
+        return [
+          index + 1, 'violation_instance', record.interviewId, record.id, record.type, record.severity,
+          instance.startSeconds, instance.endSeconds, instance.durationSeconds, yaw, pitch, instance.confidence,
+          instance.frameName, instance.frameTimeSeconds, instance.dyaw, instance.dpitch, instance.axis,
           instanceReviews[key]?.status ?? '', instanceReviews[key]?.note ?? '',
-        ]),
-      ]
+        ];
+      })
     );
   };
 
@@ -799,24 +851,33 @@ export default function App() {
             <section className="plots yaw-pane" ref={plotWrapRef}>
               <div className="plot-toolbar">
                 <div className="review-summary" aria-live="polite">
-                  <span>Dots {dotProgress.percentage == null ? '—' : `${dotProgress.percentage}%`}</span>
-                  <span>({dotProgress.correct}/{dotProgress.decided})</span>
+                  <span>Dot agreement {dotProgress.percentage == null ? '—' : `${dotProgress.percentage}%`}</span>
+                  <span>({dotProgress.correct}/{dotProgress.evaluated})</span>
                   {violationDump && (
                     <>
                       <span className="review-divider" />
-                      <span>Instances {instanceProgress.percentage == null ? '—' : `${instanceProgress.percentage}%`}</span>
-                      <span>({instanceProgress.correct}/{instanceProgress.decided})</span>
+                      <span>Instance agreement {instanceProgress.percentage == null ? '—' : `${instanceProgress.percentage}%`}</span>
+                      <span>({instanceProgress.correct}/{instanceProgress.evaluated})</span>
                     </>
                   )}
                 </div>
                 <button
                   type="button"
                   className="btn small secondary"
-                  onClick={exportReviews}
-                  disabled={!plotFrames.length && !violationInstances.length}
-                  title="Download all annotations as CSV"
+                  onClick={exportDotReviews}
+                  disabled={!plotFrames.length}
+                  title="Download dot predictions and annotations as CSV"
                 >
-                  CSV
+                  Dots CSV
+                </button>
+                <button
+                  type="button"
+                  className="btn small secondary"
+                  onClick={exportCalibrationReviews}
+                  disabled={!calibPoints.length && !violationInstances.length}
+                  title="Download calibration points and violation annotations as CSV"
+                >
+                  Calibration CSV
                 </button>
                 <button
                   type="button"
@@ -901,15 +962,15 @@ export default function App() {
                         <span>{record.severity}</span>
                       </button>
                       <div className="instance-annotations" role="group" aria-label="Annotate violation instance">
-                        {(['correct', 'incorrect', 'unsure'] as const).map((status) => (
+                        {REVIEW_TAGS.map(({ value, label }) => (
                           <button
-                            key={status}
+                            key={value}
                             type="button"
-                            className={`annotation-choice status-${status}${instanceReviews[key]?.status === status ? ' is-selected' : ''}`}
-                            aria-pressed={instanceReviews[key]?.status === status}
-                            onClick={() => markViolationInstance(key, status)}
+                            className={`annotation-choice status-${value.replace('_', '-')}${instanceReviews[key]?.status === value ? ' is-selected' : ''}`}
+                            aria-pressed={instanceReviews[key]?.status === value}
+                            onClick={() => markViolationInstance(key, value)}
                           >
-                            {status[0].toUpperCase() + status.slice(1)}
+                            {label}
                           </button>
                         ))}
                       </div>
@@ -975,15 +1036,15 @@ export default function App() {
               : `${formatTime(annotationPopup.frames[0].t)} · y=${fmt(annotationPopup.frames[0].yaw)} · p=${fmt(annotationPopup.frames[0].pitch)}`}
           </div>
           <div className="annotation-actions">
-            {(['correct', 'incorrect', 'unsure'] as const).map((status) => (
+            {REVIEW_TAGS.map(({ value, label }) => (
               <button
-                key={status}
+                key={value}
                 type="button"
-                className={`annotation-choice status-${status}${annotationDraft.status === status ? ' is-selected' : ''}`}
-                aria-pressed={annotationDraft.status === status}
-                onClick={() => setAnnotationDraft((current) => ({ ...current, status }))}
+                className={`annotation-choice status-${value.replace('_', '-')}${annotationDraft.status === value ? ' is-selected' : ''}`}
+                aria-pressed={annotationDraft.status === value}
+                onClick={() => setAnnotationDraft((current) => ({ ...current, status: value }))}
               >
-                {status[0].toUpperCase() + status.slice(1)}
+                {label}
               </button>
             ))}
           </div>
@@ -991,7 +1052,10 @@ export default function App() {
             Note
             <textarea
               value={annotationDraft.note}
-              onChange={(e) => setAnnotationDraft((current) => ({ ...current, note: e.target.value }))}
+              onChange={(e) => {
+                setAnnotationNoteChanged(true);
+                setAnnotationDraft((current) => ({ ...current, note: e.target.value }));
+              }}
               rows={2}
             />
           </label>
