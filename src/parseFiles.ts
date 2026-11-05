@@ -1,4 +1,159 @@
-import type { GazeFrame, GazeResultFile, LoadedSession, PlotFrame } from './types';
+import type {
+  GazeFrame,
+  GazeResultFile,
+  LoadedSession,
+  PlotFrame,
+  ProctoringViolation,
+  ProctoringViolationInstance,
+} from './types';
+
+class OrderedEdnReader {
+  private cursor = 0;
+
+  constructor(private readonly text: string) {}
+
+  parse(): unknown {
+    const value = this.readValue();
+    this.skipWhitespace();
+    if (this.cursor !== this.text.length) throw new Error('Unexpected text in violation instances');
+    return value;
+  }
+
+  private skipWhitespace(): void {
+    while (/[\s,]/.test(this.text[this.cursor] ?? '')) this.cursor++;
+  }
+
+  private readValue(): unknown {
+    this.skipWhitespace();
+    if (this.text.startsWith('#ordered/map', this.cursor)) return this.readOrderedMap();
+
+    const char = this.text[this.cursor];
+    if (char === '[') return this.readCollection('[', ']');
+    if (char === '(') return this.readCollection('(', ')');
+    if (char === '"') return this.readString();
+    if (char === ':') return this.readKeyword();
+    return this.readAtom();
+  }
+
+  private readOrderedMap(): Record<string, unknown> {
+    this.cursor += '#ordered/map'.length;
+    this.skipWhitespace();
+    const entries = this.readCollection('(', ')');
+    const result: Record<string, unknown> = {};
+    for (const entry of entries) {
+      if (Array.isArray(entry) && entry.length >= 2 && typeof entry[0] === 'string') {
+        result[entry[0]] = entry[1];
+      }
+    }
+    return result;
+  }
+
+  private readCollection(open: '[' | '(', close: ']' | ')'): unknown[] {
+    if (this.text[this.cursor] !== open) throw new Error('Invalid violation instances structure');
+    this.cursor++;
+    const values: unknown[] = [];
+    while (true) {
+      this.skipWhitespace();
+      if (this.cursor >= this.text.length) throw new Error('Unclosed violation instances structure');
+      if (this.text[this.cursor] === close) {
+        this.cursor++;
+        return values;
+      }
+      values.push(this.readValue());
+    }
+  }
+
+  private readString(): string {
+    const start = this.cursor++;
+    let escaped = false;
+    while (this.cursor < this.text.length) {
+      const char = this.text[this.cursor++];
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') return JSON.parse(this.text.slice(start, this.cursor)) as string;
+    }
+    throw new Error('Unclosed string in violation instances');
+  }
+
+  private readKeyword(): string {
+    this.cursor++;
+    const start = this.cursor;
+    while (this.cursor < this.text.length && !/[\s,()[\]]/.test(this.text[this.cursor])) this.cursor++;
+    return this.text.slice(start, this.cursor);
+  }
+
+  private readAtom(): unknown {
+    const start = this.cursor;
+    while (this.cursor < this.text.length && !/[\s,()[\]]/.test(this.text[this.cursor])) this.cursor++;
+    if (start === this.cursor) throw new Error('Invalid value in violation instances');
+    const atom = this.text.slice(start, this.cursor);
+    if (atom === 'nil') return null;
+    if (atom === 'true') return true;
+    if (atom === 'false') return false;
+    const number = Number(atom);
+    return Number.isFinite(number) ? number : atom;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+  return null;
+}
+
+function parseViolationInstances(value: unknown): ProctoringViolationInstance[] {
+  const parsed = typeof value === 'string' ? new OrderedEdnReader(value).parse() : value;
+  if (!Array.isArray(parsed)) return [];
+
+  return parsed.map((raw): ProctoringViolationInstance => {
+    const instance = asRecord(raw);
+    const time = asRecord(instance.time);
+    const frames = asRecord(instance.frames);
+    const snapshot = asRecord(instance.snapshot);
+    const metadata = asRecord(instance.metadata);
+    const confirmedFrames = Array.isArray(metadata.confirmed_frames) ? metadata.confirmed_frames : [];
+    const confirmedFrame = asRecord(confirmedFrames[0]);
+    const frameStartMs = asNumber(frames.start);
+    const startSeconds = asNumber(time.start) ?? asNumber(snapshot.time) ?? (frameStartMs == null ? null : frameStartMs / 1000);
+
+    return {
+      confidence: asNumber(instance.conf),
+      startSeconds,
+      endSeconds: asNumber(time.end) ?? startSeconds,
+      durationSeconds: asNumber(time.duration),
+      frameName: typeof snapshot.frame === 'string'
+        ? snapshot.frame
+        : typeof confirmedFrame.frame_name === 'string' ? confirmedFrame.frame_name : null,
+      frameTimeSeconds: asNumber(confirmedFrame.time_seconds) ?? asNumber(snapshot.time) ?? startSeconds,
+      dyaw: asNumber(metadata.dyaw),
+      dpitch: asNumber(metadata.dpitch),
+      axis: typeof metadata.axis === 'string' ? metadata.axis : null,
+    };
+  });
+}
+
+export function parseViolationDump(payload: unknown): ProctoringViolation[] {
+  const entries = Array.isArray(payload) ? payload : [payload];
+  return entries.flatMap((entry, index) => {
+    const record = asRecord(entry);
+    const interviewId = record.interviewId ?? record.interview_id;
+    if (typeof interviewId !== 'string') return [];
+
+    return [{
+      id: String(record._id ?? index),
+      interviewId,
+      type: typeof record.type === 'string' ? record.type : '',
+      severity: typeof record.severity === 'string' ? record.severity : '',
+      instances: parseViolationInstances(record.instances),
+    }];
+  });
+}
 
 function baseName(path: string): string {
   const parts = path.replace(/\\/g, '/').split('/');

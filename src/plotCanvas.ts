@@ -8,6 +8,7 @@ export interface ScatterDrawOptions {
   modePitch: number | null;
   reference: GazeReference | null;
   limits: GazeLimits | null;
+  snapshot: boolean;
   currentTime: number;
   width: number;
   height: number;
@@ -177,7 +178,9 @@ export function drawYawPitchPlot(canvas: HTMLCanvasElement, opts: ScatterDrawOpt
   }
   ctx.setLineDash([]);
 
-  const visible = opts.frames.filter((f) => f.t <= opts.currentTime + 0.05);
+  const visible = opts.snapshot
+    ? opts.frames
+    : opts.frames.filter((f) => f.t <= opts.currentTime + 0.05);
 
   for (const f of visible) {
     const x = toX(f.yaw);
@@ -203,7 +206,7 @@ export function drawYawPitchPlot(canvas: HTMLCanvasElement, opts: ScatterDrawOpt
     ctx.stroke();
   });
 
-  const currentFrame = [...visible].reverse().find((f) => f.t <= opts.currentTime);
+  const currentFrame = [...opts.frames].reverse().find((f) => f.t <= opts.currentTime + 0.05);
   if (currentFrame) {
     const cx = toX(currentFrame.yaw);
     const cy = toY(currentFrame.pitch);
@@ -234,7 +237,9 @@ export function hitTestScatter(
   const { x, y } = pointerToPlot(canvas, opts.width, opts.height, clientX, clientY);
   const bounds = computeBounds(opts.frames, opts.calibPoints, opts.modeYaw, opts.modePitch, opts.reference, opts.limits);
   const { toX, toY } = scatterTransform(opts.width, opts.height, bounds);
-  const visible = opts.frames.filter((f) => f.t <= opts.currentTime + 0.05);
+  const visible = opts.snapshot
+    ? opts.frames
+    : opts.frames.filter((f) => f.t <= opts.currentTime + 0.05);
   const r = 11;
 
   for (const c of opts.calibPoints) {

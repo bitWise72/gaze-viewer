@@ -66,3 +66,23 @@ export interface PlotFrame {
   reason?: string | null;
 }
 
+export interface ProctoringViolationInstance {
+  confidence: number | null;
+  startSeconds: number | null;
+  endSeconds: number | null;
+  durationSeconds: number | null;
+  frameName: string | null;
+  frameTimeSeconds: number | null;
+  dyaw: number | null;
+  dpitch: number | null;
+  axis: string | null;
+}
+
+export interface ProctoringViolation {
+  id: string;
+  interviewId: string;
+  type: string;
+  severity: string;
+  instances: ProctoringViolationInstance[];
+}
+

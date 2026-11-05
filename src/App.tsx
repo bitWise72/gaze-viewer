@@ -1,19 +1,71 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { buildPlotFrames, calibColor, calibLabel, frameAtTime, frameTime, loadFromFileList } from './parseFiles';
+import {
+  buildPlotFrames,
+  calibColor,
+  calibLabel,
+  frameAtTime,
+  frameTime,
+  loadFromFileList,
+  parseViolationDump,
+} from './parseFiles';
 import {
   drawDistancePlot,
   drawYawPitchPlot,
-  downloadCanvas,
   hitTestDistance,
   hitTestScatter,
   type HoverHit,
   type LineDrawOptions,
   type ScatterDrawOptions,
 } from './plotCanvas';
-import type { GazeFrame, GazeLimits, LoadedSession } from './types';
+import type {
+  GazeFrame,
+  GazeLimits,
+  LoadedSession,
+  PlotFrame,
+  ProctoringViolation,
+} from './types';
 import './styles.css';
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3];
+type ReviewStatus = 'correct' | 'incorrect' | 'unsure';
+
+interface AnnotationPopup {
+  frame: PlotFrame;
+  x: number;
+  y: number;
+}
+
+interface UploadedViolationDump {
+  fileName: string;
+  records: ProctoringViolation[];
+}
+
+function csvCell(value: string | number | null | undefined): string {
+  const text = value == null ? '' : String(value);
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+function downloadCsv(filename: string, header: string[], rows: (string | number | null | undefined)[][]) {
+  const content = [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function reviewProgress(statuses: object) {
+  const decided = (Object.values(statuses) as unknown[]).filter(
+    (status): status is Exclude<ReviewStatus, 'unsure'> => status === 'correct' || status === 'incorrect'
+  );
+  const correct = decided.filter((status) => status === 'correct').length;
+  return {
+    correct,
+    decided: decided.length,
+    percentage: decided.length ? Math.round((correct / decided.length) * 100) : null,
+  };
+}
 
 function FrameStats({ frame, limits }: { frame: GazeFrame | null; limits: GazeLimits | null }) {
   return (
@@ -90,6 +142,11 @@ export default function App() {
   const [videoDuration, setVideoDuration] = useState(0);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [simPlaying, setSimPlaying] = useState(false);
+  const [snapshotLocked, setSnapshotLocked] = useState(false);
+  const [dotReviews, setDotReviews] = useState<Record<number, ReviewStatus>>({});
+  const [instanceReviews, setInstanceReviews] = useState<Record<string, ReviewStatus>>({});
+  const [annotationPopup, setAnnotationPopup] = useState<AnnotationPopup | null>(null);
+  const [violationDump, setViolationDump] = useState<UploadedViolationDump | null>(null);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
   const [calibPreview, setCalibPreview] = useState<CalibPreview | null>(null);
 
@@ -107,6 +164,24 @@ export default function App() {
   const reference = session?.gaze?.calibration?.reference ?? null;
   const limits = session?.gaze?.calibration?.limits ?? null;
   const timelineDuration = videoDuration || plotFrames.at(-1)?.t || 0;
+  const matchedViolations = useMemo(() => {
+    const interviewId = session?.gaze?.interview_id;
+    if (!interviewId || !violationDump) return [];
+    return violationDump.records.filter((record) => record.interviewId === interviewId);
+  }, [session?.gaze?.interview_id, violationDump]);
+  const violationInstances = useMemo(
+    () => matchedViolations.flatMap((record) => record.instances.map((instance, index) => ({
+      key: `${record.id}:${index}`,
+      record,
+      instance,
+      index,
+    }))),
+    [matchedViolations]
+  );
+  const dotProgress = reviewProgress(dotReviews);
+  const instanceProgress = reviewProgress(
+    Object.fromEntries(violationInstances.map(({ key }) => [key, instanceReviews[key]]))
+  );
 
   const hasCalibImages = (session?.calibrationImages.size ?? 0) > 0;
   const hasCalibMeta = calibPoints.length > 0;
@@ -128,12 +203,13 @@ export default function App() {
       modePitch,
       reference,
       limits,
+      snapshot: snapshotLocked,
       currentTime,
       width: w,
       height: h,
       title: 'Yaw / pitch',
     };
-  }, [plotFrames, calibPoints, modeYaw, modePitch, reference, limits, currentTime]);
+  }, [plotFrames, calibPoints, modeYaw, modePitch, reference, limits, snapshotLocked, currentTime]);
 
   const lineOpts = useCallback((): LineDrawOptions | null => {
     const col = leftColRef.current;
@@ -258,8 +334,27 @@ export default function App() {
       setSession(await loadFromFileList(files));
       setCurrentTime(0);
       setCalibPreview(null);
+      setDotReviews({});
+      setAnnotationPopup(null);
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : 'Failed to load');
+    }
+  };
+
+  const onViolationFile = async (file: File | null) => {
+    if (!file) return;
+    setLoadError(null);
+    try {
+      const data: unknown = JSON.parse(await file.text());
+      const records = parseViolationDump(data);
+      setViolationDump({
+        fileName: file.name,
+        records,
+      });
+      setInstanceReviews({});
+    } catch (e) {
+      setViolationDump(null);
+      setLoadError(e instanceof Error ? e.message : 'Failed to load violation dump');
     }
   };
 
@@ -283,7 +378,47 @@ export default function App() {
     const canvas = scatterRef.current;
     if (!sOpts || !canvas) return;
     const hit = hitTestScatter(sOpts, e.clientX, e.clientY, canvas);
-    if (hit?.kind === 'frame') seekToTime(hit.frame.t);
+    if (hit?.kind === 'frame') {
+      seekToTime(hit.frame.t);
+      setAnnotationPopup({
+        frame: hit.frame,
+        x: Math.max(12, Math.min(e.clientX + 10, window.innerWidth - 270)),
+        y: Math.max(12, Math.min(e.clientY + 10, window.innerHeight - 170)),
+      });
+    } else {
+      setAnnotationPopup(null);
+    }
+  };
+
+  const markDot = (frame: PlotFrame, status: ReviewStatus) => {
+    setDotReviews((current) => ({ ...current, [frame.index]: status }));
+  };
+
+  const markViolationInstance = (key: string, status: ReviewStatus) => {
+    setInstanceReviews((current) => ({ ...current, [key]: status }));
+  };
+
+  const exportReviews = () => {
+    downloadCsv(
+      `${session?.label ?? 'interview'}-annotations.csv`,
+      [
+        'record_type', 'interview_id', 'violation_id', 'violation_type', 'severity', 'instance_number',
+        'timestamp_seconds', 'end_seconds', 'duration_seconds', 'yaw', 'pitch', 'confidence',
+        'frame_name', 'frame_timestamp_seconds', 'dyaw', 'dpitch', 'axis', 'prediction', 'annotation',
+      ],
+      [
+        ...plotFrames.map((frame) => [
+          'gaze_dot', session?.gaze?.interview_id ?? '', '', '', '', '', frame.t, '', '',
+          frame.yaw, frame.pitch, '', '', '', '', '', frame.pred ?? '', dotReviews[frame.index] ?? '',
+        ]),
+        ...violationInstances.map(({ key, record, instance, index }) => [
+          'violation_instance', record.interviewId, record.id, record.type, record.severity, index + 1,
+          instance.startSeconds, instance.endSeconds, instance.durationSeconds, '', '', instance.confidence,
+          instance.frameName, instance.frameTimeSeconds, instance.dyaw, instance.dpitch, instance.axis, '',
+          instanceReviews[key] ?? '',
+        ]),
+      ]
+    );
   };
 
   const onLineClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -379,6 +514,12 @@ export default function App() {
             Open files
             <input type="file" multiple hidden accept=".mp4,.json,.jpg,.jpeg" onChange={(e) => onFiles(e.target.files)} />
           </label>
+          {session?.videoUrl && (
+            <label className="btn secondary" title={violationDump?.fileName ?? 'Open a proctoring violations JSON dump'}>
+              {violationDump ? `Violations (${violationInstances.length})` : 'Open violations'}
+              <input type="file" hidden accept=".json,application/json" onChange={(e) => onViolationFile(e.target.files?.[0] ?? null)} />
+            </label>
+          )}
         </div>
       </header>
 
@@ -470,12 +611,35 @@ export default function App() {
 
             <section className="plots yaw-pane" ref={plotWrapRef}>
               <div className="plot-toolbar">
+                <div className="review-summary" aria-live="polite">
+                  <span>Dots {dotProgress.percentage == null ? '—' : `${dotProgress.percentage}%`}</span>
+                  <span>({dotProgress.correct}/{dotProgress.decided})</span>
+                  {violationDump && (
+                    <>
+                      <span className="review-divider" />
+                      <span>Instances {instanceProgress.percentage == null ? '—' : `${instanceProgress.percentage}%`}</span>
+                      <span>({instanceProgress.correct}/{instanceProgress.decided})</span>
+                    </>
+                  )}
+                </div>
                 <button
                   type="button"
-                  className="btn small"
-                  onClick={() => scatterRef.current && downloadCanvas(scatterRef.current, `yaw-pitch-${session.label}.png`)}
+                  className="btn small secondary"
+                  onClick={exportReviews}
+                  disabled={!plotFrames.length && !violationInstances.length}
+                  title="Download all annotations as CSV"
                 >
-                  Download
+                  CSV
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label={snapshotLocked ? 'Unlock live plot' : 'Lock full plot snapshot'}
+                  aria-pressed={snapshotLocked}
+                  title={snapshotLocked ? 'Unlock live plot' : 'Lock full plot snapshot'}
+                  onClick={() => setSnapshotLocked((locked) => !locked)}
+                >
+                  <span className={`lock-icon${snapshotLocked ? ' is-locked' : ''}`} aria-hidden="true" />
                 </button>
               </div>
               <div className="scatter-wrap" ref={scatterWrapRef}>
@@ -509,6 +673,56 @@ export default function App() {
             </section>
           </div>
 
+          {violationDump && session.videoUrl && (
+            <section className="violation-panel">
+              <div className="violation-heading">
+                <h2>Proctoring violations</h2>
+                <span>{violationInstances.length}</span>
+              </div>
+              {violationInstances.length ? (
+                <div className="violation-list">
+                  {violationInstances.map(({ key, record, instance }) => (
+                    <div className="violation-row" key={key}>
+                      <button
+                        type="button"
+                        className="violation-seek"
+                        onClick={() => instance.startSeconds != null && seekToTime(instance.startSeconds)}
+                        disabled={instance.startSeconds == null}
+                        title={instance.frameName ?? undefined}
+                      >
+                        <strong>{record.type || 'Violation'}</strong>
+                        <span>
+                          {instance.startSeconds == null
+                            ? '—'
+                            : `${formatTime(instance.startSeconds)} - ${formatTime(instance.endSeconds ?? instance.startSeconds)}`}
+                        </span>
+                        <span>{record.severity}</span>
+                        {instance.confidence != null && <span>{instance.confidence.toFixed(1)}%</span>}
+                      </button>
+                      <div className="instance-annotations" role="group" aria-label="Annotate violation instance">
+                        {(['correct', 'incorrect', 'unsure'] as const).map((status) => (
+                          <button
+                            key={status}
+                            type="button"
+                            className={`annotation-choice status-${status}${instanceReviews[key] === status ? ' is-selected' : ''}`}
+                            aria-pressed={instanceReviews[key] === status}
+                            onClick={() => markViolationInstance(key, status)}
+                          >
+                            {status[0].toUpperCase() + status.slice(1)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="gallery-empty">
+                  {session.gaze?.interview_id ? 'No instances for this interview.' : 'Interview ID is unavailable.'}
+                </p>
+              )}
+            </section>
+          )}
+
           <section className="gallery gallery-scroll">
             <h2>Calibration</h2>
             {!hasCalibMeta && !hasCalibImages && <p className="gallery-empty">Calibration not available.</p>}
@@ -527,6 +741,37 @@ export default function App() {
           {tooltip.text.split('\n').map((line) => (
             <div key={line}>{line}</div>
           ))}
+        </div>
+      )}
+
+      {annotationPopup && (
+        <div
+          className="annotation-popup"
+          style={{ left: annotationPopup.x, top: annotationPopup.y }}
+          role="dialog"
+          aria-label="Annotate gaze point"
+        >
+          <div className="annotation-point">
+            {formatTime(annotationPopup.frame.t)} · y={fmt(annotationPopup.frame.yaw)} · p={fmt(annotationPopup.frame.pitch)}
+          </div>
+          <div className="annotation-actions">
+            {(['correct', 'incorrect', 'unsure'] as const).map((status) => (
+              <button
+                key={status}
+                type="button"
+                className={`annotation-choice status-${status}${dotReviews[annotationPopup.frame.index] === status ? ' is-selected' : ''}`}
+                aria-pressed={dotReviews[annotationPopup.frame.index] === status}
+                onClick={() => markDot(annotationPopup.frame, status)}
+              >
+                {status[0].toUpperCase() + status.slice(1)}
+              </button>
+            ))}
+          </div>
+          <div className="annotation-footer">
+            <button type="button" className="annotation-close" onClick={() => setAnnotationPopup(null)} aria-label="Close annotation">
+              ×
+            </button>
+          </div>
         </div>
       )}
 
