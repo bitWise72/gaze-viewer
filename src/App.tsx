@@ -697,7 +697,6 @@ export default function App() {
                             : `${formatTime(instance.startSeconds)} - ${formatTime(instance.endSeconds ?? instance.startSeconds)}`}
                         </span>
                         <span>{record.severity}</span>
-                        {instance.confidence != null && <span>{instance.confidence.toFixed(1)}%</span>}
                       </button>
                       <div className="instance-annotations" role="group" aria-label="Annotate violation instance">
                         {(['correct', 'incorrect', 'unsure'] as const).map((status) => (
