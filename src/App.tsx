@@ -175,6 +175,7 @@ export default function App() {
   const lassoStartRef = useRef<{ clientX: number; clientY: number; localX: number; localY: number } | null>(null);
   const lassoMovedRef = useRef(false);
   const skipScatterClickRef = useRef(false);
+  const lassoHandlersRef = useRef({ update: (_x: number, _y: number) => {}, finish: (_x: number, _y: number) => {} });
   const scatterWrapRef = useRef<HTMLDivElement>(null);
   const scatterRef = useRef<HTMLCanvasElement>(null);
   const lineRef = useRef<HTMLCanvasElement>(null);
@@ -504,6 +505,24 @@ export default function App() {
     }
   };
 
+  lassoHandlersRef.current = { update: updateLasso, finish: finishLasso };
+
+  useEffect(() => {
+    if (!isLassoing) return;
+    const onWindowMove = (e: MouseEvent) => {
+      if (!lassoStartRef.current) return;
+      lassoHandlersRef.current.update(e.clientX, e.clientY);
+      setTooltip(null);
+    };
+    const onWindowUp = (e: MouseEvent) => lassoHandlersRef.current.finish(e.clientX, e.clientY);
+    window.addEventListener('mousemove', onWindowMove);
+    window.addEventListener('mouseup', onWindowUp);
+    return () => {
+      window.removeEventListener('mousemove', onWindowMove);
+      window.removeEventListener('mouseup', onWindowUp);
+    };
+  }, [isLassoing]);
+
   const saveDotAnnotation = () => {
     if (!annotationPopup) return;
     setDotReviews((current) => {
@@ -576,7 +595,6 @@ export default function App() {
 
   const onScatterMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (lassoStartRef.current) {
-      updateLasso(e.clientX, e.clientY);
       setTooltip(null);
       return;
     }
